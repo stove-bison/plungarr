@@ -1,0 +1,667 @@
+// plungarr — automatically reviews Sonarr/Radarr download queues and
+// processes stuck items the way a careful human would:
+//
+//   1. VERIFIED IMPORT  — import-blocked/pending items whose only problems are
+//      ignorable ("matched by ID", "unable to determine if sample") get their
+//      manual-import candidates verified (same series/movie the grab was
+//      tracked for, episodes mapped, no other rejections) and force-imported.
+//      A mapping mismatch is never imported.
+//   2. DEAD RELEASE     — nothing eligible to import, or a "season pack" that
+//      is a single video file: remove + blocklist + re-search, with a loop
+//      guard (same release title blocklisted LOOP_GUARD_LIMIT times => remove
+//      WITHOUT re-search, since indexers keep serving the same junk).
+//   3. NOT AN UPGRADE   — the downloaded file doesn't improve on the existing
+//      one: remove + blocklist, no re-search (the library file stays).
+//   4. ANYTHING ELSE    — logged as NOTIFY and left untouched. Never guess.
+//
+// Items are only acted on after they've been seen in a previous cycle at least
+// MIN_AGE_MINUTES ago, so an import that is actively being processed is never
+// raced (a manualimport call during an active import sees files mid-move).
+//
+// CORRUPTION SWEEP: report files with missing metadata, small size, or low
+// estimated bitrate. These are inspection hints, not proof of corruption.
+// This sweep never deletes library files or launches replacement searches.
+//
+// STALL WATCHER (every cycle, needs SABNZBD_URL + SABNZBD_API_KEY): watches the
+// SABnzbd queue for posts whose articles are gone from Usenet and sit at the
+// head of the queue "downloading" at ~0 B/s, starving everything behind them.
+// Two checks:
+//
+//   DOOMED  ? an actively downloading job exceeds configured missing-article
+//             thresholds across multiple observations. These are heuristics;
+//             repair/checking/fetching states are always left untouched.
+//   STALLED — the HEAD downloading slot made less than STALL_MIN_PROGRESS_MB
+//             of progress in STALL_MINUTES (default 5MB / 45min). Only the
+//             head is judged: items behind it legitimately receive no
+//             bandwidth. One removal per cycle clears a wall of dead jobs one
+//             by one while live downloads reset their own clock by progressing.
+//
+// A head slot wedged in Checking/Verifying/Repairing/Fetching is NOTIFY-only
+// (long par2 repairs are legitimate work; a persistent wedge may need a SAB
+// restart, which the janitor deliberately does not automate). Skips entirely
+// (and forgets progress anchors) while SAB is paused. Downloads not tracked by
+// any arr are deleted in SAB directly (ORPHAN) rather than blocklisted.
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+const env = (k, d) => (process.env[k] ?? d);
+function numberEnv(key, fallback, min = 0, max = Number.MAX_SAFE_INTEGER, integer = false) {
+  const raw = env(key, fallback);
+  const value = Number(raw);
+  if (String(raw).trim() === '' || !Number.isFinite(value) || value < min || value > max ||
+      (integer && !Number.isSafeInteger(value))) {
+    throw new Error(`Invalid ${key}: expected ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`);
+  }
+  return value;
+}
+function boolEnv(key, fallback) {
+  const value = String(env(key, fallback)).trim();
+  if (/^(1|true|yes)$/i.test(value)) return true;
+  if (/^(0|false|no)$/i.test(value)) return false;
+  throw new Error(`Invalid ${key}: expected true or false`);
+}
+const CONFIG = {
+  apps: [
+    { name: 'sonarr', url: env('SONARR_URL', ''), key: env('SONARR_API_KEY', ''), kind: 'series' },
+    { name: 'radarr', url: env('RADARR_URL', ''), key: env('RADARR_API_KEY', ''), kind: 'movie' },
+  ].filter(a => a.url && a.key),
+  intervalSec: numberEnv('INTERVAL_SECONDS', 300, 1, 2147483),
+  minAgeMin: numberEnv('MIN_AGE_MINUTES', 5),
+  dryRun: boolEnv('DRY_RUN', false),
+  runOnce: boolEnv('RUN_ONCE', false),
+  stateFile: env('STATE_FILE', '/state/janitor-state.json'),
+  loopGuardLimit: numberEnv('LOOP_GUARD_LIMIT', 2, 0, Number.MAX_SAFE_INTEGER, true),
+  sab: {
+    url: env('SABNZBD_URL', '').replace(/\/$/, ''),
+    key: env('SABNZBD_API_KEY', ''),
+    stallMin: numberEnv('STALL_MINUTES', 45, Number.MIN_VALUE),
+    minProgressMb: numberEnv('STALL_MIN_PROGRESS_MB', 5, Number.MIN_VALUE),
+    missingFrac: numberEnv('STALL_MISSING_FRAC', 0.12, 0, 1),
+    missingTriedFrac: numberEnv('STALL_MISSING_TRIED_FRAC', 0.35, 0, 1),
+    maxActions: numberEnv('STALL_MAX_ACTIONS_PER_CYCLE', 2, 0, Number.MAX_SAFE_INTEGER, true),
+  },
+  failReview: {
+    enabled: boolEnv('FAIL_REVIEW_ENABLED', true),
+    everyHours: numberEnv('FAIL_REVIEW_HOURS', 6, Number.MIN_VALUE),
+    windowHours: numberEnv('FAIL_REVIEW_WINDOW_HOURS', 48, Number.MIN_VALUE),
+    failLimit: numberEnv('FAIL_REVIEW_FAIL_LIMIT', 3, 1, Number.MAX_SAFE_INTEGER, true),
+  },
+  corrupt: {
+    enabled: boolEnv('CORRUPT_SWEEP_ENABLED', true),
+    sweepHours: numberEnv('CORRUPT_SWEEP_HOURS', 24, Number.MIN_VALUE),
+    stubMb: numberEnv('CORRUPT_STUB_MB', 20),
+    actExts: env('CORRUPT_ACT_EXTS', '.mkv').toLowerCase().split(',').map(s => s.trim()).filter(Boolean),
+    minKbps: numberEnv('CORRUPT_MIN_KBPS', 150),
+  },
+};
+// Accept and validate old numeric settings during upgrades. Corruption review
+// is report-only, so these settings can no longer authorize library deletion.
+for (const key of ['CORRUPT_MAX_DELETES', 'CORRUPT_LOOP_LIMIT', 'CORRUPT_MIN_AGE_HOURS']) {
+  if (process.env[key] !== undefined) numberEnv(key, 0, 0, Number.MAX_SAFE_INTEGER, key !== 'CORRUPT_MIN_AGE_HOURS');
+}
+
+const IGNORABLE = [
+  /matched to (series|movie) by ID/i,
+  /Unable to determine if file is a sample/i,
+  /One or more episodes expected in this release were not imported/i,
+];
+const RX_EMPTY = /No files found are eligible for import/i;
+const RX_SEASON_BUNDLE = /Single episode file contains all episodes/i;
+const RX_NOT_UPGRADE = /do not improve on Existing|Not an? (Custom Format )?upgrade for existing/i;
+
+const log = (app, action, title, detail = '') =>
+  console.log(`${new Date().toISOString()} | ${app} | ${action} | ${title}${detail ? ' | ' + detail : ''}`);
+
+// ---------- state (first-seen ages + blocklist loop guard) ----------
+function loadState() {
+  if (CONFIG.dryRun) return { firstSeen: {}, blocklistCount: {}, actioned: {} };
+  try {
+    const st = JSON.parse(fs.readFileSync(CONFIG.stateFile, 'utf8'));
+    // Downtime is not an observation of an actively stalled download.
+    st.sabProgress = {};
+    delete st.sabObservedAt;
+    return st;
+  }
+  catch { return { firstSeen: {}, blocklistCount: {}, actioned: {} }; }
+}
+function saveState(st) {
+  if (CONFIG.dryRun) return; // simulation state is memory-only
+  try {
+    fs.mkdirSync(path.dirname(CONFIG.stateFile), { recursive: true });
+    fs.writeFileSync(CONFIG.stateFile, JSON.stringify(st));
+  } catch (e) { console.error('state save failed:', e.message); }
+}
+const normTitle = t => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '.');
+
+// ---------- api ----------
+async function api(app, method, p, body) {
+  const r = await fetch(app.url.replace(/\/$/, '') + '/api/v3' + p, {
+    method,
+    headers: { 'X-Api-Key': app.key, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!r.ok) throw new Error(`${method} ${p} -> HTTP ${r.status}`);
+  const text = await r.text();
+  return text ? JSON.parse(text) : null;
+}
+
+// ---------- classification ----------
+function classify(rec) {
+  const state = rec.trackedDownloadState;
+  if (rec.status !== 'completed' || !/^import(Blocked|Pending|Failed)$/.test(state || '')) return null;
+  // An entry's title is usually just the release name — only treat it as the
+  // problem text when the entry has no messages. Including release names in
+  // the every-ignorable check would incorrectly classify known blocks.
+  const msgs = (rec.statusMessages || [])
+    .flatMap(m => (m.messages && m.messages.length) ? m.messages : [m.title || ''])
+    .filter(Boolean);
+  if (!msgs.length) return null; // quietly waiting for the import scanner — not ours
+  if (msgs.some(m => RX_EMPTY.test(m))) return 'dead_empty';
+  if (msgs.some(m => RX_SEASON_BUNDLE.test(m))) return 'dead_bundle';
+  if (msgs.some(m => RX_NOT_UPGRADE.test(m))) return 'not_upgrade';
+  if (msgs.every(m => IGNORABLE.some(rx => rx.test(m)))) return 'verified_import';
+  return 'unknown';
+}
+
+// ---------- actions ----------
+async function removeItems(app, recs, { blocklist, research }) {
+  const ids = recs.map(r => r.id);
+  if (CONFIG.dryRun) return log(app.name, 'DRY-RUN remove', recs[0].title, `blocklist=${blocklist} research=${research}`);
+  await api(app, 'DELETE',
+    `/queue/bulk?removeFromClient=true&blocklist=${blocklist}&skipRedownload=${!research}`, { ids });
+}
+
+async function verifiedImport(app, rec) {
+  const cands = await api(app, 'GET', `/manualimport?downloadId=${rec.downloadId}&filterExistingFiles=true`);
+  if (!Array.isArray(cands) || !cands.length) {
+    log(app.name, 'NOTIFY', rec.title, 'no manual-import candidates despite importable classification');
+    return false;
+  }
+  const files = [];
+  for (const c of cands) {
+    const rej = (c.rejections || []).map(x => x.reason || x)
+      .filter(x => !IGNORABLE.some(rx => rx.test(x)));
+    if (rej.length) { log(app.name, 'NOTIFY', c.relativePath || rec.title, 'unexpected rejection: ' + rej.join('; ')); return false; }
+    if (app.kind === 'series') {
+      if (!c.series || c.series.id !== rec.seriesId || !(c.episodes || []).length) {
+        log(app.name, 'NOTIFY', c.relativePath || rec.title,
+          `mapping mismatch (candidate series ${c.series && c.series.id} vs tracked ${rec.seriesId})`);
+        return false;
+      }
+      files.push({
+        path: c.path, folderName: c.folderName, seriesId: c.series.id,
+        episodeIds: c.episodes.map(e => e.id), quality: c.quality, languages: c.languages,
+        downloadId: c.downloadId, releaseGroup: c.releaseGroup,
+        indexerFlags: c.indexerFlags || 0, releaseType: c.releaseType || 'singleEpisode',
+      });
+    } else {
+      if (!c.movie || c.movie.id !== rec.movieId) {
+        log(app.name, 'NOTIFY', c.relativePath || rec.title,
+          `mapping mismatch (candidate movie ${c.movie && c.movie.id} vs tracked ${rec.movieId})`);
+        return false;
+      }
+      files.push({
+        path: c.path, folderName: c.folderName, movieId: c.movie.id,
+        quality: c.quality, languages: c.languages,
+        downloadId: c.downloadId, releaseGroup: c.releaseGroup,
+        indexerFlags: c.indexerFlags || 0,
+      });
+    }
+  }
+  if (CONFIG.dryRun) return log(app.name, 'DRY-RUN import', rec.title, `${files.length} file(s)`), true;
+  await api(app, 'POST', '/command', { name: 'ManualImport', files, importMode: 'auto' });
+  log(app.name, 'IMPORTED', rec.title, `${files.length} file(s) sent to ManualImport`);
+  return true;
+}
+
+// ---------- one cycle for one app ----------
+async function arrQueue(app) {
+  const records = [], seen = new Set();
+  let total;
+  for (let page = 1; page <= 1000; page++) {
+    const q = await api(app, 'GET', `/queue?page=${page}&pageSize=500&sortKey=added&sortDirection=ascending&includeUnknownSeriesItems=true&includeUnknownMovieItems=true`);
+    if (!q || !Array.isArray(q.records) || !Number.isSafeInteger(q.totalRecords) || q.totalRecords < 0 ||
+        (q.page !== undefined && q.page !== page) || (total !== undefined && q.totalRecords !== total)) {
+      throw new Error('Incomplete or changing arr queue; no actions taken');
+    }
+    total = q.totalRecords;
+    for (const rec of q.records) {
+      if (!Number.isSafeInteger(rec.id) || seen.has(rec.id)) throw new Error('Invalid or duplicate arr queue record; no actions taken');
+      seen.add(rec.id);
+      records.push(rec);
+    }
+    if (records.length === total) return records;
+    if (!q.records.length || records.length > total) throw new Error('Incomplete arr queue; no actions taken');
+  }
+  throw new Error('Arr queue pagination limit reached; no actions taken');
+}
+
+async function processApp(app, st) {
+  const recs = await arrQueue(app);
+  const byDownload = new Map();
+  for (const r of recs) {
+    if (!r.downloadId) continue;
+    if (!byDownload.has(r.downloadId)) byDownload.set(r.downloadId, []);
+    byDownload.get(r.downloadId).push(r);
+  }
+  const now = Date.now();
+  for (const [downloadId, group] of byDownload) {
+    // state keys are app-scoped: a bare downloadId let each app's prune pass
+    // delete the OTHER app's gate entries every cycle, so nothing ever aged
+    // past the gate.
+    const gateKey = `${app.name}:${downloadId}`;
+    const rec = group[0];
+    const cls = classify(rec);
+    if (!cls) { delete st.firstSeen[gateKey]; continue; }
+
+    // ImportBlocked is a settled state — Sonarr already evaluated the import
+    // and halted awaiting intervention (TrackedDownloadState enum), so there
+    // is nothing to race: act on first sighting. Transitional states
+    // (ImportPending/ImportFailed) keep the two-sighting age gate, since the
+    // arr's own importer may still pick those up mid-move.
+    if (rec.trackedDownloadState !== 'importBlocked') {
+      if (!st.firstSeen[gateKey]) { st.firstSeen[gateKey] = now; continue; }
+      if (now - st.firstSeen[gateKey] < CONFIG.minAgeMin * 60_000) continue;
+    }
+    // don't repeat an action for a downloadId the arr hasn't processed yet
+    if (st.actioned[gateKey] && now - st.actioned[gateKey] < 30 * 60_000) continue;
+
+    try {
+      if (cls === 'verified_import') {
+        if (await verifiedImport(app, rec) && !CONFIG.dryRun) st.actioned[gateKey] = now;
+      } else if (cls === 'dead_empty' || cls === 'dead_bundle') {
+        const key = normTitle(rec.title);
+        const n = st.blocklistCount[key] || 0;
+        const research = n < CONFIG.loopGuardLimit;
+        await removeItems(app, group, { blocklist: true, research });
+        if (!CONFIG.dryRun) st.blocklistCount[key] = n + 1;
+        if (!CONFIG.dryRun) st.actioned[gateKey] = now;
+        log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + (research ? 'REMOVED+RESEARCH' : 'REMOVED (loop guard, no re-search)'), rec.title, cls);
+      } else if (cls === 'not_upgrade') {
+        await removeItems(app, group, { blocklist: true, research: false });
+        if (!CONFIG.dryRun) st.actioned[gateKey] = now;
+        log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + 'REMOVED (not an upgrade)', rec.title);
+      } else {
+        log(app.name, 'NOTIFY', rec.title,
+          'unrecognized block, left untouched: ' +
+          (rec.statusMessages || []).flatMap(m => m.messages || []).join('; ').slice(0, 200));
+      }
+    } catch (e) {
+      log(app.name, 'ERROR', rec.title, e.message);
+    }
+  }
+  // prune state entries for downloads no longer queued
+  const pfx = app.name + ':';
+  for (const m of [st.firstSeen, st.actioned]) {
+    for (const k of Object.keys(m)) {
+      if (!k.includes(':')) { delete m[k]; continue; } // legacy bare keys
+      if (k.startsWith(pfx) && !byDownload.has(k.slice(pfx.length))) delete m[k];
+    }
+  }
+}
+
+// ---------- corruption sweep ----------
+const isUnreadable = mi => !mi || !mi.videoCodec;
+const fileExt = p => path.extname(p || '').toLowerCase();
+
+const runTimeSeconds = rt => {
+  const parts = String(rt || '').split(':').map(Number);
+  if (!parts.length || parts.some(isNaN)) return 0;
+  return parts.reduce((s, p) => s * 60 + p, 0);
+};
+
+function classifyFile(f) {
+  const mb = (f.size || 0) / (1024 * 1024);
+  const tiny = mb < CONFIG.corrupt.stubMb;
+  if (!isUnreadable(f.mediaInfo)) {
+    if (!tiny) return null;
+    // Readable but tiny. Size alone is not evidence — outtakes, commercials
+    // and short specials can legitimately have small files.
+    // Low estimated bitrate is suspicious but can be legitimate. Report it
+    // for inspection; metadata alone must not authorize deletion.
+    const secs = runTimeSeconds(f.mediaInfo.runTime);
+    if (secs >= 60 && (f.size * 8 / 1000) / secs < CONFIG.corrupt.minKbps) return 'junk_readable';
+    return 'tiny_readable';
+  }
+  if (tiny) return 'stub'; // suspicious size with absent metadata; report only
+  return CONFIG.corrupt.actExts.includes(fileExt(f.relativePath || f.path)) ? 'unreadable' : 'scanner_blind';
+}
+
+async function corruptSweepApp(app) {
+  // Metadata and bitrate are hints only. This sweep never mutates a library.
+  let flagged = 0;
+  const report = (f, label) => {
+    const cls = classifyFile(f);
+    if (!cls) return;
+    flagged++;
+    log(app.name, 'CORRUPT-NOTIFY', label,
+      cls + ' ? inspect the file and scanner manually; left untouched');
+  };
+  if (app.kind === 'series') {
+    for (const s of await api(app, 'GET', '/series')) {
+      if (!(s.statistics && s.statistics.episodeFileCount > 0)) continue;
+      for (const f of await api(app, 'GET', '/episodefile?seriesId=' + s.id)) {
+        report(f, s.title + ': ' + f.relativePath);
+      }
+    }
+  } else {
+    for (const m of await api(app, 'GET', '/movie')) {
+      if (m.hasFile && m.movieFile) report(m.movieFile, m.title + ': ' + m.movieFile.relativePath);
+    }
+  }
+  return flagged;
+}
+
+let sweepRunning = false;
+async function corruptSweep(st) {
+  if (!CONFIG.corrupt.enabled || sweepRunning) return;
+  const due = (st[CONFIG.dryRun ? 'lastDryCorruptSweep' : 'lastCorruptSweep'] || 0) + CONFIG.corrupt.sweepHours * 3600_000;
+  if (Date.now() < due) return;
+  sweepRunning = true;
+  try { await corruptSweepInner(st); } finally { sweepRunning = false; }
+}
+async function corruptSweepInner(st) {
+  st[CONFIG.dryRun ? 'lastDryCorruptSweep' : 'lastCorruptSweep'] = Date.now();
+  saveState(st); // persist the stamp NOW — a restart mid-sweep must not re-run it at startup
+  log('corrupt-sweep', 'START', `walking all tracked files (this can take many minutes on a large library)`);
+  const budget = { used: 0 };
+  for (const app of CONFIG.apps) {
+    try {
+      const flagged = await corruptSweepApp(app);
+      log(app.name, 'CORRUPT-SWEEP-DONE', `${flagged} file(s) flagged`, 'report-only; no files deleted');
+    } catch (e) {
+      console.error(`${new Date().toISOString()} | ${app.name} | CORRUPT-SWEEP-ERROR | ${e.message}`);
+    }
+  }
+}
+
+// ---------- stall watcher (SABnzbd) ----------
+async function sabApi(params) {
+  const qs = new URLSearchParams({ output: 'json', apikey: CONFIG.sab.key, ...params });
+  const r = await fetch(`${CONFIG.sab.url}/api?${qs}`, { signal: AbortSignal.timeout(30_000) });
+  if (!r.ok) throw new Error(`SAB ${params.mode} -> HTTP ${r.status}`);
+  const result = await r.json();
+  if (result?.error || result?.status === false) throw new Error('SAB rejected ' + params.mode + ' request');
+  return result;
+}
+
+// Remove a SAB download through whichever arr tracks it (blocklist + re-search
+// with the usual loop guard); an untracked download is deleted in SAB directly.
+async function stallRemove(st, nzoId, slotName, why, confirm = async () => true) {
+  for (const app of CONFIG.apps) {
+    const matches = r => (r.downloadId || '').toLowerCase() === nzoId.toLowerCase();
+    let group = (await arrQueue(app)).filter(matches);
+    if (!group.length) {
+      // A constant total cannot detect every change between pages. Before
+      // declaring an orphan, confirm against the arr's unpaginated endpoint.
+      const details = await api(app, 'GET', '/queue/details');
+      if (!Array.isArray(details) || details.some(r => !r || !Number.isSafeInteger(r.id))) {
+        throw new Error('Invalid ownership confirmation; no removal attempted');
+      }
+      group = details.filter(matches);
+    }
+    if (!group.length) continue;
+    const key = normTitle(group[0].title);
+    const n = st.blocklistCount[key] || 0;
+    const research = n < CONFIG.loopGuardLimit;
+    if (!await confirm()) return false;
+    await removeItems(app, group, { blocklist: true, research });
+    if (!CONFIG.dryRun) st.blocklistCount[key] = n + 1;
+    log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + (research ? `${why}-REMOVED+RESEARCH` : `${why}-REMOVED (loop guard, no re-search)`), group[0].title);
+    return true;
+  }
+  if (!await confirm()) return false;
+  if (CONFIG.dryRun) { log('sab', `DRY-RUN ${why}-delete orphan`, slotName); return true; }
+  const result = await sabApi({ mode: 'queue', name: 'delete', value: nzoId });
+  if (result?.status !== true) throw new Error('SAB did not confirm removal');
+  log('sab', `${why}-DELETED (ORPHAN, no arr tracks it)`, slotName);
+  return true;
+}
+
+async function sabQueue() {
+  const slots = [], seen = new Set();
+  let total;
+  for (let start = 0; start < 200000; start += 200) {
+    const q = (await sabApi({ mode: 'queue', start, limit: 200 }))?.queue;
+    if (!q || !Array.isArray(q.slots)) throw new Error('Invalid SAB queue');
+    if (q.paused || q.paused_all) return { ...q, slots: [] };
+    const count = q.noofslots_total ?? q.noofslots;
+    if (!Number.isSafeInteger(count) || count < 0 || (total !== undefined && count !== total)) {
+      throw new Error('Incomplete or changing SAB queue');
+    }
+    total = count;
+    for (const slot of q.slots) {
+      if (typeof slot.nzo_id !== 'string' || !slot.nzo_id || seen.has(slot.nzo_id)) {
+        throw new Error('Invalid or duplicate SAB queue slot');
+      }
+      seen.add(slot.nzo_id);
+      slots.push(slot);
+    }
+    if (slots.length === total) return { ...q, slots };
+    if (q.slots.length !== 200 || slots.length > total) throw new Error('Incomplete SAB queue');
+  }
+  throw new Error('SAB queue pagination limit reached');
+}
+
+async function stallSweep(st) {
+  if (!CONFIG.sab.url || !CONFIG.sab.key) return;
+  try { await stallSweepInner(st); }
+  catch (e) {
+    st.sabProgress = {};
+    delete st.sabObservedAt;
+    throw e;
+  }
+}
+
+const byteCounter = value => (typeof value === 'number' ||
+  (typeof value === 'string' && value.trim() !== '')) ? Number(value) : NaN;
+function missingThresholdExceeded(s) {
+  const mb = byteCounter(s.mb), missing = byteCounter(s.mbmissing), left = byteCounter(s.mbleft);
+  const tried = Math.max(0, mb - left) + missing;
+  return [mb, missing, left].every(Number.isFinite) && left >= 0 && left <= mb &&
+    mb >= 50 && missing > 0 && (missing / mb > CONFIG.sab.missingFrac ||
+    (tried >= 50 && missing / tried > CONFIG.sab.missingTriedFrac));
+}
+
+async function confirmStall(nzoId, why, anchor) {
+  let q;
+  try {
+    q = await sabQueue();
+    if (q.paused || q.paused_all) throw new Error('SAB paused during confirmation; cycle cancelled');
+  } catch (e) {
+    e.stallObservationInvalid = true;
+    throw e;
+  }
+  const s = q.slots.find(s => s.nzo_id === nzoId);
+  if (!s || s.status !== 'Downloading') return false;
+  if (why === 'DOOMED') return missingThresholdExceeded(s);
+  if (q.slots.find(s => s.status !== 'Paused')?.nzo_id !== nzoId) return false;
+  const mb = byteCounter(s.mb), left = byteCounter(s.mbleft);
+  return Number.isFinite(mb) && Number.isFinite(left) && mb > 0 && left >= 0 && left <= mb &&
+    mb - left >= anchor.dl && mb - left - anchor.dl < CONFIG.sab.minProgressMb;
+}
+
+async function stallSweepInner(st) {
+  const q = await sabQueue();
+  const now = Date.now();
+  st.sabProgress = st.sabProgress || {};
+  // Gaps in observation and paused time must never accrue toward deletion.
+  if (st.sabObservedAt && (now < st.sabObservedAt ||
+      now - st.sabObservedAt > Math.max(60, 2 * CONFIG.intervalSec) * 1000)) st.sabProgress = {};
+  st.sabObservedAt = now;
+  if (q.paused || q.paused_all) { st.sabProgress = {}; return; }
+  const slots = q.slots;
+  const head = slots.find(s => s.status !== 'Paused');
+  const eligible = new Set();
+  for (const s of slots) if (s.status === 'Downloading') eligible.add('doom:' + s.nzo_id);
+  if (head) eligible.add((head.status === 'Downloading' ? 'head:' : 'notice:') + head.nzo_id);
+  for (const key of Object.keys(st.sabProgress)) if (!eligible.has(key)) delete st.sabProgress[key];
+  let actions = 0;
+  const attempted = new Set();
+
+  // Missing-article ratios are configurable heuristics, not proof that PAR2
+  // cannot repair a job. Only actively downloading jobs are eligible.
+  for (const s of slots) {
+    if (s.status !== 'Downloading') continue;
+    const doomed = missingThresholdExceeded(s);
+    const key = 'doom:' + s.nzo_id;
+    if (!doomed) { delete st.sabProgress[key]; continue; }
+    if (!st.sabProgress[key]) { st.sabProgress[key] = now; continue; }
+    if (now - st.sabProgress[key] < CONFIG.minAgeMin * 60000) continue;
+    if (actions >= CONFIG.sab.maxActions) continue; // keep observing/resetting every slot
+    attempted.add(s.nzo_id);
+    actions++; // reserve the budget even if a request fails after reaching SAB
+    try {
+      await stallRemove(st, s.nzo_id, s.filename, 'DOOMED', () => confirmStall(s.nzo_id, 'DOOMED'));
+    } catch (e) {
+      if (e.stallObservationInvalid) throw e;
+      log('sab', 'ERROR', s.filename, 'doomed removal: ' + e.message);
+    }
+    delete st.sabProgress[key];
+    delete st.sabProgress['head:' + s.nzo_id];
+  }
+
+  if (!head || attempted.has(head.nzo_id)) return;
+  if (head.status === 'Downloading') {
+    const mb = byteCounter(head.mb), left = byteCounter(head.mbleft);
+    const key = 'head:' + head.nzo_id;
+    if (!Number.isFinite(mb) || !Number.isFinite(left) || mb <= 0 || left < 0 || left > mb) {
+      delete st.sabProgress[key]; return;
+    }
+    const downloaded = mb - left;
+    const a = st.sabProgress[key];
+    if (!a || downloaded < a.dl || downloaded - a.dl >= CONFIG.sab.minProgressMb) {
+      st.sabProgress[key] = { dl: downloaded, ts: now };
+    } else if (now - a.ts >= CONFIG.sab.stallMin * 60000 && actions < CONFIG.sab.maxActions) {
+      try { await stallRemove(st, head.nzo_id, head.filename, 'STALLED', () => confirmStall(head.nzo_id, 'STALLED', a)); }
+      catch (e) {
+        if (e.stallObservationInvalid) throw e;
+        log('sab', 'ERROR', head.filename, 'stall removal: ' + e.message);
+      }
+      delete st.sabProgress[key];
+    }
+  } else {
+    const key = 'notice:' + head.nzo_id;
+    const a = st.sabProgress[key];
+    if (!a || a.status !== head.status) st.sabProgress[key] = { status: head.status, ts: now };
+    else if (now - a.ts >= 2 * CONFIG.sab.stallMin * 60000 && !a.notified) {
+      log('sab', 'STALL-NOTIFY', head.filename, 'head remains in ' + head.status + '; left untouched');
+      a.notified = true;
+    }
+  }
+}
+
+// ---------- failure review ----------
+// Sonarr/Radarr do their own searching (RSS sync etc.); the janitor's job is
+// to read their history and SURFACE the targets that keep failing: an episode
+// or movie with >= failLimit failed grabs in the window and no import since
+// its last failure gets one PROBLEM log line (re-logged only if the count
+// grows). Handling stays with a human — never guess.
+let failReviewRunning = false;
+async function failReview(st) {
+  if (!CONFIG.failReview.enabled || failReviewRunning) return;
+  if (Date.now() < (st.lastFailReview || 0) + CONFIG.failReview.everyHours * 3600_000) return;
+  failReviewRunning = true;
+  try {
+    st.lastFailReview = Date.now();
+    saveState(st);
+    await failReviewInner(st);
+  } finally { failReviewRunning = false; }
+}
+async function failReviewInner(st) {
+  const cutoff = Date.now() - CONFIG.failReview.windowHours * 3600_000;
+  st.failReported = st.failReported || {};
+  for (const app of CONFIG.apps) {
+    try {
+      const events = [];
+      for (let page = 1; page <= 6; page++) {
+        const h = await api(app, 'GET', `/history?page=${page}&pageSize=500&sortKey=date&sortDirection=descending`);
+        const recs = (h && h.records) || [];
+        events.push(...recs);
+        if (!recs.length || Date.parse(recs[recs.length - 1].date) < cutoff) break;
+      }
+      const byTarget = new Map();
+      for (const e of events) {
+        const at = Date.parse(e.date);
+        if (!(at >= cutoff)) continue;
+        const id = app.kind === 'series' ? e.episodeId : e.movieId;
+        if (!id) continue;
+        if (!byTarget.has(id)) byTarget.set(id, { fails: 0, lastFailAt: 0, lastFailTitle: '', lastImportAt: 0 });
+        const t = byTarget.get(id);
+        if (e.eventType === 'downloadFailed') {
+          t.fails++;
+          if (at > t.lastFailAt) { t.lastFailAt = at; t.lastFailTitle = e.sourceTitle || ''; }
+        } else if (e.eventType === 'downloadFolderImported') {
+          t.lastImportAt = Math.max(t.lastImportAt, at);
+        }
+      }
+      let problems = 0;
+      for (const [id, t] of byTarget) {
+        if (t.fails < CONFIG.failReview.failLimit || t.lastImportAt > t.lastFailAt) continue;
+        const key = `${app.name}:${id}`;
+        if ((st.failReported[key] || 0) >= t.fails) continue; // same count already reported
+        st.failReported[key] = t.fails;
+        problems++;
+        let label = `${app.kind} #${id}`;
+        try {
+          if (app.kind === 'series') {
+            const ep = await api(app, 'GET', `/episode/${id}`);
+            let seriesTitle = ep.series && ep.series.title;
+            if (!seriesTitle && ep.seriesId) seriesTitle = (await api(app, 'GET', `/series/${ep.seriesId}`)).title;
+            label = `${seriesTitle} S${String(ep.seasonNumber).padStart(2, '0')}E${String(ep.episodeNumber).padStart(2, '0')} "${ep.title}"`;
+          } else {
+            const mv = await api(app, 'GET', `/movie/${id}`);
+            label = `${mv.title} (${mv.year})`;
+          }
+        } catch { /* label fallback is fine */ }
+        log(app.name, 'PROBLEM', label,
+          `${t.fails} failed grab(s) in ${CONFIG.failReview.windowHours}h, none imported since | last: ${(t.lastFailTitle || '').slice(0, 60)}`);
+      }
+      log(app.name, 'FAIL-REVIEW-DONE', `${byTarget.size} target(s) had history in window`, `${problems} new/escalated problem(s)`);
+    } catch (e) {
+      log(app.name, 'ERROR', 'failure review', e.message);
+    }
+  }
+  const keys = Object.keys(st.failReported);
+  if (keys.length > 2000) for (const k of keys.slice(0, keys.length - 1000)) delete st.failReported[k];
+}
+
+// ---------- main loop ----------
+// In-memory state is the source of truth; the file is best-effort persistence
+// across restarts (an unwritable /state only costs cross-restart memory).
+const state = loadState();
+let cycleRunning = false;
+async function cycle() {
+  if (cycleRunning) return; // a long corrupt sweep must not stack concurrent cycles
+  cycleRunning = true;
+  try { await cycleInner(); } finally { cycleRunning = false; }
+}
+async function cycleInner() {
+  const t0 = Date.now();
+  for (const app of CONFIG.apps) {
+    try { await processApp(app, state); }
+    catch (e) { console.error(`${new Date().toISOString()} | ${app.name} | CYCLE-ERROR | ${e.message}`); }
+  }
+  log('cycle', 'HEARTBEAT', `queues processed in ${Math.round((Date.now() - t0) / 1000)}s`,
+    `${Object.keys(state.firstSeen).length} gated, sweep ${sweepRunning ? 'running' : 'idle'}`);
+  try { await stallSweep(state); }
+  catch (e) { console.error(`${new Date().toISOString()} | stall-sweep | CYCLE-ERROR | ${e.message}`); }
+  // Normal service cycles continue during reviews; one-shot execution waits
+  // for completion. Persist review results after the asynchronous work too.
+  const reviews = [
+    corruptSweep(state).catch(e => console.error(`${new Date().toISOString()} | corrupt-sweep | CYCLE-ERROR | ${e.message}`)).finally(() => saveState(state)),
+    failReview(state).catch(e => console.error(`${new Date().toISOString()} | fail-review | CYCLE-ERROR | ${e.message}`)).finally(() => saveState(state)),
+  ];
+  if (CONFIG.runOnce) await Promise.all(reviews);
+  saveState(state);
+}
+
+if (!CONFIG.apps.length) {
+  console.error('No apps configured — set SONARR_URL/SONARR_API_KEY and/or RADARR_URL/RADARR_API_KEY.');
+  process.exit(1);
+}
+console.log(`plungarr starting: apps=[${CONFIG.apps.map(a => a.name).join(', ')}] interval=${CONFIG.intervalSec}s minAge=${CONFIG.minAgeMin}m dryRun=${CONFIG.dryRun} corruptSweep=${CONFIG.corrupt.enabled ? `every ${CONFIG.corrupt.sweepHours}h (report-only)` : 'off'} failReview=${CONFIG.failReview.enabled ? `every ${CONFIG.failReview.everyHours}h (>=${CONFIG.failReview.failLimit} fails/${CONFIG.failReview.windowHours}h)` : 'off'} stallWatch=${CONFIG.sab.url && CONFIG.sab.key ? `on (head <${CONFIG.sab.minProgressMb}MB/${CONFIG.sab.stallMin}min, doomed >${Math.round(CONFIG.sab.missingFrac * 100)}% missing, ${CONFIG.sab.maxActions}/cycle)` : 'off (set SABNZBD_URL + SABNZBD_API_KEY)'}`);
+await cycle();
+if (!CONFIG.runOnce) setInterval(cycle, CONFIG.intervalSec * 1000);

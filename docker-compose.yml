@@ -1,0 +1,11 @@
+services:
+  plungarr:
+    build: .
+    container_name: plungarr
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - state:/state
+
+volumes:
+  state:

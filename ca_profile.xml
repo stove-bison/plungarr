@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<CommunityApplications>
+  <Profile>
+Home of **plungarr** — unclogs your Sonarr/Radarr download pipeline. It watches the arr queues and SABnzbd, auto-fixes stuck imports, removes dead usenet posts that stall the queue at 0 B/s, blocklists junk releases, flags chronically failing episodes, and reports suspicious library files for manual inspection. Anything it can't fix safely, it reports and leaves alone.
+
+Support: https://github.com/stove-bison/plungarr/issues
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/stove-bison/plungarr/master/icon.svg</Icon>
+  <WebPage>https://github.com/stove-bison/plungarr</WebPage>
+</CommunityApplications>
