@@ -1,3 +1,16 @@
+# Corruption review reporting
+
+- Suspects are reported once per file, and again only if the file changes
+  or after `NOTIFY_REMIND_DAYS`. Entries for files that leave the library
+  are forgotten automatically.
+- `CORRUPT_REPORT_CLASSES` (default `unreadable,stub,junk_readable`) selects
+  which classes are reported. `tiny_readable` and `scanner_blind` are opt-in
+  because they are mostly legitimate shorts and unscanned containers.
+- Each report now says what was seen and what it usually means, in plain
+  words, with the file size.
+- The sweep summary reports files checked, new suspects, previously reported,
+  and suppressed counts.
+
 # Container user and state directory
 
 - The image now starts as root only to chown `/state` to `PUID:PGID`

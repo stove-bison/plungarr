@@ -42,7 +42,7 @@ after "completed" is never raced.
 | Sweep | What it catches |
 |---|---|
 | **Failure review** (6h) | Reads the arrs' history and flags any episode/movie with 3+ failed grabs and no successful import since as a `PROBLEM` log line — your short list of things that need a human to pick a release. Report-only. |
-| **Corruption review** (24h) | Reports tracked files with missing MediaInfo, unusually small size, or low estimated bitrate. These are inspection hints, not proof of corruption. Never deletes library files or searches for replacements. |
+| **Corruption review** (24h) | Reports tracked files that look wrong: an MKV with no media info, a tiny file with no metadata, or a very low bitrate for its length. Each suspect is reported once, again only if it changes or after `NOTIFY_REMIND_DAYS`. Small-but-readable files and unscanned containers (`.avi`, `.vob`, `.iso`) are opt-in via `CORRUPT_REPORT_CLASSES`. Never deletes library files or searches for replacements. |
 
 ### SABnzbd — stall watcher (every cycle, optional)
 
@@ -150,6 +150,7 @@ Everything is an environment variable with a sane default — see
 | `DRY_RUN` | false | Log intended actions; use fresh memory-only state without reading or writing live state |
 | `RUN_ONCE` | false | Run one cycle and finish the periodic reviews before exiting |
 | `PUID` / `PGID` | 99 / 100 | User and group the service runs as; `/state` is chowned to them at start |
+| `CORRUPT_REPORT_CLASSES` | unreadable,stub,junk_readable | Suspect classes to report; add `tiny_readable` and/or `scanner_blind` for the full list |
 | `ARCHIVE_ACTION` | replace | Unextracted archive: `replace`, `discard`, or `notify` |
 | `DANGEROUS_FILE_ACTION` | replace | Dangerous or executable file: `replace`, `discard`, or `notify` |
 | `SAMPLE_ACTION` | notify | File flagged as a sample: `replace`, `discard`, or `notify` |

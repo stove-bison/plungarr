@@ -650,3 +650,45 @@ test('N14: a repeating error line is sent once until the reminder window passes'
   h.advance(25 * 60); h.log('state', 'STATE-ERROR', 'state save failed: EACCES', '');
   await h.notifyFlush(st); assert.equal(h.posts.length, 2);
 });
+
+// ---------- corruption sweep reporting ----------
+test('C1: only the actionable classes are reported by default', async () => {
+  const h = harness(), st = state();
+  movies(h, [file(1), file(2, { size: 5 * 1024 ** 2, mediaInfo: { videoCodec: 'x264', runTime: '00:00:30' } })]);
+  const stats = await h.corruptSweepApp(radarr, st);
+  assert.equal(stats.fresh, 1); assert.equal(stats.suppressed, 1);
+  assert.ok(h.logs.some(l => l.includes('example-1.mkv') && l.includes('no media info')));
+  assert.ok(!h.logs.some(l => l.includes('example-2.mkv')));
+});
+
+test('C2: CORRUPT_REPORT_CLASSES opts the quiet classes in, and rejects unknown names', async () => {
+  const h = harness({ CORRUPT_REPORT_CLASSES: 'tiny_readable' }), st = state();
+  movies(h, [file(1), file(2, { size: 5 * 1024 ** 2, mediaInfo: { videoCodec: 'x264', runTime: '00:00:30' } })]);
+  await h.corruptSweepApp(radarr, st);
+  assert.ok(h.logs.some(l => l.includes('example-2.mkv') && l.includes('legitimate short')));
+  assert.ok(!h.logs.some(l => l.includes('example-1.mkv')));
+  assert.throws(() => harness({ CORRUPT_REPORT_CLASSES: 'unreadable,bogus' }), /CORRUPT_REPORT_CLASSES/);
+});
+
+test('C3: a suspect is reported once, again when it changes, and again after the reminder window', async () => {
+  const h = harness({ NOTIFY_REMIND_DAYS: '3' }), st = state();
+  let files = [file(1)]; movies(h, files);
+  let s1 = await h.corruptSweepApp(radarr, st); assert.equal(s1.fresh, 1);
+  let s2 = await h.corruptSweepApp(radarr, st); assert.equal(s2.fresh, 0); assert.equal(s2.known, 1);
+  assert.equal(h.logs.filter(l => l.includes('CORRUPT-NOTIFY')).length, 1);
+  movies(h, [file(1, { size: 2 * 1024 ** 3 })]);
+  let s3 = await h.corruptSweepApp(radarr, st); assert.equal(s3.fresh, 1);
+  h.advance(4 * 24 * 60);
+  let s4 = await h.corruptSweepApp(radarr, st); assert.equal(s4.fresh, 1);
+  const h0 = harness({ NOTIFY_REMIND_DAYS: '0' }), st0 = state(); movies(h0, [file(1)]);
+  await h0.corruptSweepApp(radarr, st0); h0.advance(365 * 24 * 60);
+  assert.equal((await h0.corruptSweepApp(radarr, st0)).fresh, 0);
+});
+
+test('C4: reported entries for files no longer in the library are forgotten', async () => {
+  const h = harness(), st = state();
+  movies(h, [file(1)]); await h.corruptSweepApp(radarr, st);
+  assert.ok(st.corruptReported['radarr:1']);
+  movies(h, []); await h.corruptSweepApp(radarr, st);
+  assert.equal(st.corruptReported['radarr:1'], undefined);
+});

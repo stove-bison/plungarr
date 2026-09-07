@@ -80,6 +80,11 @@ function urlEnv(key) {
   if (!u || !/^https?:$/.test(u.protocol)) throw new Error(`Invalid ${key}: expected an http(s) URL`);
   return raw;
 }
+function listEnv(key, fallback, values) {
+  const items = String(env(key, fallback)).split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  for (const v of items) if (!values.includes(v)) throw new Error(`Invalid ${key}: expected a comma-separated subset of ${values.join(', ')}`);
+  return items;
+}
 function jsonObjectEnv(key) {
   const raw = env(key, '').trim();
   if (!raw) return {};
@@ -149,6 +154,11 @@ const CONFIG = {
     stubMb: numberEnv('CORRUPT_STUB_MB', 20),
     actExts: env('CORRUPT_ACT_EXTS', '.mkv').toLowerCase().split(',').map(s => s.trim()).filter(Boolean),
     minKbps: numberEnv('CORRUPT_MIN_KBPS', 150),
+    // Which suspect classes get a CORRUPT-NOTIFY line. The two "can't tell"
+    // classes (tiny_readable, scanner_blind) are opt-in because they are
+    // mostly legitimate shorts and unscanned containers.
+    reportClasses: listEnv('CORRUPT_REPORT_CLASSES', 'unreadable,stub,junk_readable',
+      ['unreadable', 'stub', 'junk_readable', 'tiny_readable', 'scanner_blind']),
   },
 };
 // Accept and validate old numeric settings during upgrades. Corruption review
@@ -446,15 +456,45 @@ function classifyFile(f) {
   return CONFIG.corrupt.actExts.includes(fileExt(f.relativePath || f.path)) ? 'unreadable' : 'scanner_blind';
 }
 
-async function corruptSweepApp(app) {
+// What each suspect class looks like and what it usually means, in plain words.
+function corruptDetail(cls, f) {
+  const mb = Math.round((f.size || 0) / (1024 * 1024));
+  const ext = fileExt(f.relativePath || f.path) || 'file';
+  switch (cls) {
+    case 'unreadable': return `${mb} MB ${ext} with no media info; the scanner normally reads this format. Worth opening by hand.`;
+    case 'stub': return `${mb} MB with no media info. Likely an incomplete or placeholder file.`;
+    case 'junk_readable': {
+      const secs = runTimeSeconds(f.mediaInfo && f.mediaInfo.runTime);
+      return `${mb} MB over ${Math.round(secs / 60)} min, about ${Math.round((f.size * 8 / 1000) / secs)} kbps. Very low bitrate for its length.`;
+    }
+    case 'tiny_readable': return `${mb} MB, metadata readable. Usually a legitimate short or extra.`;
+    default: return `${mb} MB ${ext} with no media info; the scanner often skips this format. Cannot tell either way.`;
+  }
+}
+
+async function corruptSweepApp(app, st = {}) {
   // Metadata and bitrate are hints only. This sweep never mutates a library.
-  let flagged = 0;
+  // Each suspect is reported once (per file id, size and class) and again only
+  // if it changes or after NOTIFY_REMIND_DAYS; the arr API is the only thing
+  // read, so re-checking costs nothing.
+  const seen = st.corruptReported = st.corruptReported || {};
+  const now = Date.now(), remindMs = CONFIG.notify.remindDays * 86_400_000;
+  const stats = { checked: 0, flagged: 0, fresh: 0, known: 0, suppressed: 0 };
+  const live = new Set();
   const report = (f, label) => {
+    stats.checked++;
     const cls = classifyFile(f);
     if (!cls) return;
-    flagged++;
-    log(app.name, 'CORRUPT-NOTIFY', label,
-      cls + ' ? inspect the file and scanner manually; left untouched');
+    stats.flagged++;
+    if (!CONFIG.corrupt.reportClasses.includes(cls)) { stats.suppressed++; return; }
+    const key = `${app.name}:${f.id}`;
+    live.add(key);
+    const prev = seen[key];
+    if (prev && prev.cls === cls && prev.size === f.size &&
+        (CONFIG.notify.remindDays === 0 || now - prev.ts < remindMs)) { stats.known++; return; }
+    seen[key] = { cls, size: f.size, ts: now };
+    stats.fresh++;
+    log(app.name, 'CORRUPT-NOTIFY', label, corruptDetail(cls, f) + ' Left untouched.');
   };
   if (app.kind === 'series') {
     for (const s of await api(app, 'GET', '/series')) {
@@ -468,7 +508,9 @@ async function corruptSweepApp(app) {
       if (m.hasFile && m.movieFile) report(m.movieFile, m.title + ': ' + m.movieFile.relativePath);
     }
   }
-  return flagged;
+  const pfx = app.name + ':';
+  for (const k of Object.keys(seen)) if (k.startsWith(pfx) && !live.has(k)) delete seen[k];
+  return stats;
 }
 
 let sweepRunning = false;
@@ -483,11 +525,11 @@ async function corruptSweepInner(st) {
   st[CONFIG.dryRun ? 'lastDryCorruptSweep' : 'lastCorruptSweep'] = Date.now();
   saveState(st); // persist the stamp NOW — a restart mid-sweep must not re-run it at startup
   log('corrupt-sweep', 'START', `walking all tracked files (this can take many minutes on a large library)`);
-  const budget = { used: 0 };
   for (const app of CONFIG.apps) {
     try {
-      const flagged = await corruptSweepApp(app);
-      log(app.name, 'CORRUPT-SWEEP-DONE', `${flagged} file(s) flagged`, 'report-only; no files deleted');
+      const s = await corruptSweepApp(app, st);
+      log(app.name, 'CORRUPT-SWEEP-DONE', `${s.checked} file(s) checked`,
+        `${s.fresh} new suspect(s), ${s.known} previously reported, ${s.suppressed} in unreported classes; report-only, no files deleted`);
     } catch (e) {
       logError(app.name, 'CORRUPT-SWEEP-ERROR', e.message);
     }

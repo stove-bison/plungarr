@@ -47,6 +47,7 @@
   <Config Name="Digest weekday" Target="NOTIFY_DIGEST_DAY" Default="monday" Mode="" Description="Weekday for weekly digests." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Digest day of month" Target="NOTIFY_DIGEST_DAY_OF_MONTH" Default="1" Mode="" Description="Day (1-28) for monthly digests." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Reminder days" Target="NOTIFY_REMIND_DAYS" Default="7" Mode="" Description="Re-send an attention item still unresolved after this many days. 0 = never." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Corruption report classes" Target="CORRUPT_REPORT_CLASSES" Default="unreadable,stub,junk_readable" Mode="" Description="Comma-separated suspect classes to report. Add tiny_readable and/or scanner_blind for the full list. Each suspect is reported once." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID the service runs as; /state is chowned to it at start." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID the service runs as." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Timezone" Target="TZ" Default="" Mode="" Description="Container timezone for digest scheduling, e.g. Europe/London or America/New_York." Type="Variable" Display="advanced" Required="false" Mask="false"/>
