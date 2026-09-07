@@ -692,3 +692,10 @@ test('C4: reported entries for files no longer in the library are forgotten', as
   movies(h, []); await h.corruptSweepApp(radarr, st);
   assert.equal(st.corruptReported['radarr:1'], undefined);
 });
+
+test('N15: the heartbeat reports the SABnzbd stall watcher state', async () => {
+  const h = notifier({ NOTIFY_HEARTBEAT: 'daily', NOTIFY_ATTENTION: 'none' }), st = state();
+  clock(h, at(2026, 3, 10, 8, 5)); st.notify = { pending: {}, seen: {}, lastDigest: { daily: at(2026, 3, 9, 8, 1) }, counters: {} };
+  await h.notifyFlush(st);
+  assert.match(bodyOf(h.posts[0]).text, /SABnzbd stall watcher on/);
+});

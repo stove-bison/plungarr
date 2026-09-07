@@ -941,6 +941,7 @@ async function notifyFlush(st) {
       summarySent = true;
     } else if (cat === 'heartbeat') {
       sections.push(`## ${CATEGORY_LABEL[cat]}\nplungarr alive: apps ${CONFIG.apps.map(a => a.name).join(', ')}, ` +
+        `SABnzbd stall watcher ${CONFIG.sab.url && CONFIG.sab.key ? 'on' : 'off'}, ` +
         `${Object.keys(st.firstSeen || {}).length} item(s) gated, ${n.openAttention || 0} need attention`);
     } else if (n.pending[cat] && n.pending[cat].length) {
       const list = n.pending[cat];
@@ -970,7 +971,8 @@ async function notifyFlush(st) {
 async function notifyStartup() {
   if (!CONFIG.notify.url) return;
   const cad = CONFIG.notify.cadence;
-  const text = `plungarr online. apps: ${CONFIG.apps.map(a => a.name).join(', ')}; dryRun=${CONFIG.dryRun}; ` +
+  const sab = CONFIG.sab.url && CONFIG.sab.key ? 'on' : 'off (set SABNZBD_URL + SABNZBD_API_KEY)';
+  const text = `plungarr online. apps: ${CONFIG.apps.map(a => a.name).join(', ')}; SABnzbd stall watcher: ${sab}; dryRun=${CONFIG.dryRun}; ` +
     `format=${CONFIG.notify.format}; cadence: ` + CATEGORY_ORDER.map(c => `${c}=${cad[c]}`).join(', ') +
     `; digest at ${String(CONFIG.notify.hour).padStart(2, '0')}:00 local, weekly ${WEEKDAYS[CONFIG.notify.day]}, monthly day ${CONFIG.notify.dayOfMonth}`;
   try { await notifySend('plungarr online', text, []); log('notify', 'NOTIFY-STARTUP', 'startup message sent'); }
