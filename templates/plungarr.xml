@@ -24,7 +24,7 @@
   <Config Name="Sonarr API key" Target="SONARR_API_KEY" Default="" Mode="" Description="Sonarr Settings > General > Security > API Key" Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Radarr URL" Target="RADARR_URL" Default="http://SERVER-IP:7878" Mode="" Description="Radarr base URL. Leave empty to disable Radarr handling." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="Radarr API key" Target="RADARR_API_KEY" Default="" Mode="" Description="Radarr Settings > General > Security > API Key" Type="Variable" Display="always" Required="false" Mask="true"/>
-  <Config Name="SABnzbd URL" Target="SABNZBD_URL" Default="" Mode="" Description="Optional; enables the stalled/dead-download watcher." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="SABnzbd URL" Target="SABNZBD_URL" Default="http://SERVER-IP:8080" Mode="" Description="Optional. The stalled/dead-download watcher turns on only when both this and the API key are set." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="SABnzbd API key" Target="SABNZBD_API_KEY" Default="" Mode="" Description="SABnzbd Config > General > API Key" Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Dry run" Target="DRY_RUN" Default="false" Mode="" Description="true = log intended actions without doing anything. Recommended for the first day." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="Cycle seconds" Target="INTERVAL_SECONDS" Default="300" Mode="" Description="Seconds between queue checks." Type="Variable" Display="advanced" Required="false" Mask="false"/>
