@@ -699,3 +699,21 @@ test('N15: the heartbeat reports the SABnzbd stall watcher state', async () => {
   await h.notifyFlush(st);
   assert.match(bodyOf(h.posts[0]).text, /SABnzbd stall watcher on/);
 });
+
+test('N16: attention lines seen before NOTIFY_URL or a cadence was set are still sent once enabled', async () => {
+  // Cycles ran with no receiver configured; the same state file is then used with one.
+  const off = harness(), st = state();
+  queued(off, [blocked(1, ['Sample'])]);
+  await off.processApp(sonarr, st); off.advance(6); await off.processApp(sonarr, st); await off.notifyFlush(st);
+  assert.equal(Object.keys(st.notify.seen).length, 0);
+  const on = notifier(); queued(on, [blocked(1, ['Sample'])]);
+  on.advance(12); await on.processApp(sonarr, st); await on.notifyFlush(st);
+  assert.equal(on.posts.length, 1); assert.ok(bodyOf(on.posts[0]).text.includes('Release.1'));
+  // Same again for a category that was 'none' and is later switched on.
+  const none = notifier({ NOTIFY_ATTENTION: 'none' }), st2 = state(); queued(none, [blocked(1, ['Sample'])]);
+  await none.processApp(sonarr, st2); none.advance(6); await none.processApp(sonarr, st2); await none.notifyFlush(st2);
+  assert.equal(none.posts.length, 0);
+  const later = notifier(); queued(later, [blocked(1, ['Sample'])]);
+  later.advance(12); await later.processApp(sonarr, st2); await later.notifyFlush(st2);
+  assert.equal(later.posts.length, 1);
+});

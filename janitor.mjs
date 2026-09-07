@@ -901,27 +901,31 @@ async function notifyFlush(st) {
   const n = notifyInit(st);
   const now = Date.now();
   const remindMs = CONFIG.notify.remindDays * 86_400_000;
+  // No receiver configured: drop the buffer without recording anything, so
+  // enabling NOTIFY_URL later sends everything that is still outstanding.
+  if (!CONFIG.notify.url) { notifyBuffer.length = 0; n.pending = {}; return; }
   const openNow = new Set();
   for (const ev of notifyBuffer.splice(0)) {
     const c = counterOf(ev.action);
     if (c) n.counters[c] = (n.counters[c] || 0) + 1;
+    if (ev.category === 'attention') openNow.add(`${ev.app}|${ev.title}|${ev.detail}`.slice(0, 400));
+    if (CONFIG.notify.cadence[ev.category] === 'none') continue;
     // Attention items and errors repeat every cycle while unresolved; send
     // each distinct line once, then again only after the reminder window.
+    // "Seen" is recorded only when the line is actually queued, so a category
+    // switched from none to a cadence later still sends what is outstanding.
     if (ev.category === 'attention' || ev.category === 'errors') {
       const key = `${ev.category}|${ev.app}|${ev.title}|${ev.detail}`.slice(0, 400);
-      if (ev.category === 'attention') openNow.add(key);
       const last = n.seen[key];
       if (last === undefined && ev.category === 'attention') n.counters.attentionOpened = (n.counters.attentionOpened || 0) + 1;
       if (last !== undefined && (CONFIG.notify.remindDays === 0 || now - last < remindMs)) continue;
       n.seen[key] = now;
     }
-    if (CONFIG.notify.cadence[ev.category] === 'none') continue;
     (n.pending[ev.category] = n.pending[ev.category] || []).push(ev);
   }
   if (openNow.size) n.openAttention = openNow.size;
   const keep = Math.max(CONFIG.notify.remindDays * 2, 60) * 86_400_000;
   for (const [k, ts] of Object.entries(n.seen)) if (now - ts > keep) delete n.seen[k];
-  if (!CONFIG.notify.url) { n.pending = {}; return; }
 
   const due = new Set(['immediate']);
   for (const c of ['daily', 'weekly', 'monthly']) if ((n.lastDigest[c] || 0) < lastSlot(c, now)) due.add(c);
