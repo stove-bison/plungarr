@@ -640,3 +640,13 @@ test('N13: heartbeat sends a digest even when nothing else happened', async () =
   assert.equal(h.posts.length, 1);
   assert.ok(/alive/i.test(bodyOf(h.posts[0]).text));
 });
+
+test('N14: a repeating error line is sent once until the reminder window passes', async () => {
+  const h = notifier({ NOTIFY_REMIND_DAYS: '1', NOTIFY_ATTENTION: 'none' }), st = state();
+  for (let i = 0; i < 3; i++) h.log('state', 'STATE-ERROR', 'state save failed: EACCES', '');
+  await h.notifyFlush(st); assert.equal(h.posts.length, 1);
+  h.log('state', 'STATE-ERROR', 'state save failed: EACCES', '');
+  await h.notifyFlush(st); assert.equal(h.posts.length, 1);
+  h.advance(25 * 60); h.log('state', 'STATE-ERROR', 'state save failed: EACCES', '');
+  await h.notifyFlush(st); assert.equal(h.posts.length, 2);
+});

@@ -1,3 +1,11 @@
+# Container user and state directory
+
+- The image now starts as root only to chown `/state` to `PUID:PGID`
+  (default 99:100, Unraid's nobody:users) and then drops privileges via
+  su-exec. Bind-mounted state folders created by Docker or Unraid are
+  writable without manual intervention. Set `PUID`/`PGID` to match your
+  host convention.
+
 # Notifications
 
 - Optional webhook delivery: set `NOTIFY_URL` and pick `NOTIFY_FORMAT`

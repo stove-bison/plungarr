@@ -149,6 +149,7 @@ Everything is an environment variable with a sane default — see
 | `INTERVAL_SECONDS` | 300 | Cycle length |
 | `DRY_RUN` | false | Log intended actions; use fresh memory-only state without reading or writing live state |
 | `RUN_ONCE` | false | Run one cycle and finish the periodic reviews before exiting |
+| `PUID` / `PGID` | 99 / 100 | User and group the service runs as; `/state` is chowned to them at start |
 | `ARCHIVE_ACTION` | replace | Unextracted archive: `replace`, `discard`, or `notify` |
 | `DANGEROUS_FILE_ACTION` | replace | Dangerous or executable file: `replace`, `discard`, or `notify` |
 | `SAMPLE_ACTION` | notify | File flagged as a sample: `replace`, `discard`, or `notify` |

@@ -863,12 +863,14 @@ async function notifyFlush(st) {
   for (const ev of notifyBuffer.splice(0)) {
     const c = counterOf(ev.action);
     if (c) n.counters[c] = (n.counters[c] || 0) + 1;
-    if (ev.category === 'attention') {
-      const key = `${ev.app}|${ev.title}|${ev.detail}`.slice(0, 400);
-      openNow.add(key);
+    // Attention items and errors repeat every cycle while unresolved; send
+    // each distinct line once, then again only after the reminder window.
+    if (ev.category === 'attention' || ev.category === 'errors') {
+      const key = `${ev.category}|${ev.app}|${ev.title}|${ev.detail}`.slice(0, 400);
+      if (ev.category === 'attention') openNow.add(key);
       const last = n.seen[key];
-      if (last === undefined) n.counters.attentionOpened = (n.counters.attentionOpened || 0) + 1;
-      else if (CONFIG.notify.remindDays === 0 || now - last < remindMs) continue;
+      if (last === undefined && ev.category === 'attention') n.counters.attentionOpened = (n.counters.attentionOpened || 0) + 1;
+      if (last !== undefined && (CONFIG.notify.remindDays === 0 || now - last < remindMs)) continue;
       n.seen[key] = now;
     }
     if (CONFIG.notify.cadence[ev.category] === 'none') continue;
