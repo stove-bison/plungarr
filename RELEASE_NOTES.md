@@ -1,3 +1,36 @@
+# Notifications
+
+- Optional webhook delivery: set `NOTIFY_URL` and pick `NOTIFY_FORMAT`
+  (`discord`, `slack`, `ntfy`, `gotify`, `apprise`, or generic `json`).
+  `NOTIFY_TOKEN` and `NOTIFY_EXTRA_JSON` cover receiver-specific auth and
+  fields. Empty `NOTIFY_URL` keeps the previous log-only behaviour.
+- Seven categories each take `immediate`, `daily`, `weekly`, `monthly`, or
+  `none`: attention and errors default to immediate, actions and problems to
+  daily, corruption to weekly, summary and heartbeat to none.
+- Digest schedule via `NOTIFY_DIGEST_HOUR`, `NOTIFY_DIGEST_DAY`, and
+  `NOTIFY_DIGEST_DAY_OF_MONTH` in container local time. Unresolved attention
+  items are re-sent after `NOTIFY_REMIND_DAYS`.
+- Pending items and sent-times persist in the state file. Delivery failures
+  are retried next cycle and never block queue processing. Dry run logs the
+  digest text and never POSTs. A startup message validates the receiver.
+- Invalid notification settings stop startup naming the setting.
+
+# Configurable block actions
+
+- Four new settings decide what plungarr does with blocks it recognises but
+  that need a policy choice: `ARCHIVE_ACTION` (default `replace`),
+  `DANGEROUS_FILE_ACTION` (default `replace`), `SAMPLE_ACTION` (default
+  `notify`), and `NOT_UPGRADE_ACTION` (default `discard`). Each takes
+  `replace`, `discard`, or `notify`; any other value stops startup naming the
+  setting.
+- Not-an-upgrade rejections reported only on the manual-import candidates,
+  not on the queue item, are now handled. Previously they were logged as an
+  unexpected rejection and left in the queue indefinitely.
+- Items in these classes always wait one cycle before plungarr acts, even when
+  the arr reports them as import-blocked.
+- The `REMOVED+RESEARCH` log label is now `REMOVED+REPLACE`; the loop-guard
+  label reads `no replacement search`. Behaviour is unchanged.
+
 # Safety changes
 
 - Library corruption review is report-only. Missing metadata, small files,

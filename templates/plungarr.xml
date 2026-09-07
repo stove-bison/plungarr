@@ -12,6 +12,12 @@
   <Overview>Unclogs your Sonarr/Radarr download pipeline: auto-fixes stuck imports, removes dead usenet posts stalling SABnzbd, blocklists junk releases, flags chronic failures, and reports suspicious library files for manual inspection. What it can't fix safely it reports and leaves alone. Requires Sonarr and/or Radarr API keys; SABnzbd credentials are optional and enable the stall watcher.</Overview>
   <Category>Downloaders: Tools:</Category>
   <TemplateURL>https://raw.githubusercontent.com/stove-bison/plungarr/master/templates/plungarr.xml</TemplateURL>
+  <ReadMe>https://raw.githubusercontent.com/stove-bison/plungarr/master/README.md</ReadMe>
+  <License>MIT</License>
+  <ExtraSearchTerms>sonarr radarr sabnzbd queue stuck import stalled janitor</ExtraSearchTerms>
+  <Requires>Sonarr and/or Radarr reachable from this container with an API key. SABnzbd is optional.</Requires>
+  <Changes>Configurable actions for archive, dangerous-file, sample and not-an-upgrade blocks. Optional webhook notifications (Discord, Slack, ntfy, Gotify, Apprise, JSON) with per-category daily/weekly/monthly digests.</Changes>
+  <Date>2026-09-07</Date>
   <ExtraParams/>
   <PostArgs/>
   <Config Name="Sonarr URL" Target="SONARR_URL" Default="http://SERVER-IP:8989" Mode="" Description="Sonarr base URL. Leave empty to disable Sonarr handling." Type="Variable" Display="always" Required="false" Mask="false"/>
@@ -22,5 +28,25 @@
   <Config Name="SABnzbd API key" Target="SABNZBD_API_KEY" Default="" Mode="" Description="SABnzbd Config > General > API Key" Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Dry run" Target="DRY_RUN" Default="false" Mode="" Description="true = log intended actions without doing anything. Recommended for the first day." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="Cycle seconds" Target="INTERVAL_SECONDS" Default="300" Mode="" Description="Seconds between queue checks." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Archive action" Target="ARCHIVE_ACTION" Default="replace" Mode="" Description="Unextracted archive in a completed download: replace (remove, blocklist, search again), discard (remove, blocklist, no search), or notify (leave it, report it)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Dangerous file action" Target="DANGEROUS_FILE_ACTION" Default="replace" Mode="" Description="Dangerous or executable file in a download: replace, discard, or notify." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Sample action" Target="SAMPLE_ACTION" Default="notify" Mode="" Description="File flagged as a sample: replace, discard, or notify. Default notify because short-form shows trip the sample detector on real episodes." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Not-an-upgrade action" Target="NOT_UPGRADE_ACTION" Default="discard" Mode="" Description="Download that is not an upgrade for the existing library file: replace, discard, or notify." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify URL" Target="NOTIFY_URL" Default="" Mode="" Description="Optional webhook for digests: Discord/Slack webhook URL, ntfy topic URL, Gotify https://host/message, Apprise API notify URL, or your own endpoint. Empty = log only." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Notify format" Target="NOTIFY_FORMAT" Default="json" Mode="" Description="discord, slack, ntfy, gotify, apprise, or json." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Notify token" Target="NOTIFY_TOKEN" Default="" Mode="" Description="Optional. Bearer token for ntfy/apprise/json, app token for gotify." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Notify extra JSON" Target="NOTIFY_EXTRA_JSON" Default="" Mode="" Description="Optional JSON object merged into every payload (Discord username, Gotify priority, Apprise urls). For ntfy the fields become headers." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: attention" Target="NOTIFY_ATTENTION" Default="immediate" Mode="" Description="Items plungarr will not touch. immediate, daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: errors" Target="NOTIFY_ERRORS" Default="immediate" Mode="" Description="API and cycle errors. immediate, daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: actions" Target="NOTIFY_ACTIONS" Default="daily" Mode="" Description="Itemised list of everything plungarr did. immediate, daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: problems" Target="NOTIFY_PROBLEMS" Default="daily" Mode="" Description="Chronic grab failures from the failure review. immediate, daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: corruption" Target="NOTIFY_CORRUPTION" Default="weekly" Mode="" Description="Suspect library files from the corruption sweep. immediate, daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: summary" Target="NOTIFY_SUMMARY" Default="none" Mode="" Description="Totals for the period with no per-item lines. daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Notify: heartbeat" Target="NOTIFY_HEARTBEAT" Default="none" Mode="" Description="A 'plungarr alive' line even when nothing happened. daily, weekly, monthly, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Digest hour" Target="NOTIFY_DIGEST_HOUR" Default="8" Mode="" Description="Hour (0-23, container local time; set TZ) for daily, weekly, and monthly digests." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Digest weekday" Target="NOTIFY_DIGEST_DAY" Default="monday" Mode="" Description="Weekday for weekly digests." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Digest day of month" Target="NOTIFY_DIGEST_DAY_OF_MONTH" Default="1" Mode="" Description="Day (1-28) for monthly digests." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Reminder days" Target="NOTIFY_REMIND_DAYS" Default="7" Mode="" Description="Re-send an attention item still unresolved after this many days. 0 = never." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Timezone" Target="TZ" Default="" Mode="" Description="Container timezone for digest scheduling, e.g. Europe/London or America/New_York." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="State" Target="/state" Default="/mnt/user/appdata/plungarr" Mode="rw" Description="Persists first-seen ages and loop guards across restarts." Type="Path" Display="advanced" Required="true" Mask="false"/>
 </Container>

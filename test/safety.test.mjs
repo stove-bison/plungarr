@@ -17,8 +17,9 @@ const state = () => ({ firstSeen: {}, actioned: {}, blocklistCount: {}, corruptC
 
 function harness(env = {}) {
   let now = Date.UTC(2026, 0, 1);
-  const calls = [], logs = [], disk = new Map();
+  const calls = [], logs = [], disk = new Map(), posts = [];
   const fixture = {
+    post: async (url, headers, body) => { posts.push({ url, headers, body }); },
     api: async (app, method, url, body) => {
       calls.push({ app: app.name, method, url, body });
       if (method !== 'GET') return {};
@@ -35,7 +36,7 @@ function harness(env = {}) {
     Date: class extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } },
     fs: { readFileSync: p => { if (!disk.has(p)) throw Error('absent'); return disk.get(p); },
       mkdirSync() {}, writeFileSync: (p, text) => disk.set(p, text) },
-    path, URLSearchParams, AbortSignal,
+    path, URL, URLSearchParams, AbortSignal,
     fetch: () => { throw new Error('Real network is forbidden in this harness'); },
     console: { log: (...args) => logs.push(args.join(' ')), error: (...args) => logs.push(args.join(' ')) },
     fixture,
@@ -43,11 +44,13 @@ function harness(env = {}) {
   vm.runInContext(library + `
     api = (...args) => fixture.api(...args);
     sabApi = (...args) => fixture.sab(...args);
+    notifyPost = (...args) => fixture.post(...args);
     globalThis.subject = { CONFIG, classifyFile, corruptSweepApp, corruptSweep,
-      processApp, stallSweep, stallRemove, verifiedImport, saveState, loadState };
+      processApp, stallSweep, stallRemove, verifiedImport, saveState, loadState,
+      log, notifyFlush, buildPayload, categoryOf };
   `, context);
-  return { ...context.subject, calls, logs, disk, fixture,
-    advance: minutes => { now += minutes * 60000; } };
+  return { ...context.subject, calls, logs, disk, fixture, posts,
+    advance: minutes => { now += minutes * 60000; }, setNow: ts => { now = ts; } };
 }
 
 const file = (id, overrides = {}) => ({ id, size: 1024 ** 3, relativePath: `example-${id}.mkv`,
@@ -402,4 +405,238 @@ test('F2: global pause or failure during confirmation invalidates the entire cyc
     assert.equal(deletes(h).length, 0);
     assert.equal(Object.keys(st.sabProgress).length, 0);
   }
+});
+
+// ---------- configurable block actions ----------
+const queued = (h, records) => { h.fixture.api = async (app, method, url, body) => {
+  h.calls.push({ app: app.name, method, url, body });
+  if (method !== 'GET') return {};
+  if (url.startsWith('/queue')) return { page: 1, totalRecords: records.length, records };
+  if (url.startsWith('/manualimport')) return h.candidates || [];
+  throw new Error('Unexpected mock read: ' + url);
+}; };
+const blocked = (id, messages, extra = {}) => ({ id, downloadId: `dl-${id}`, title: `Release.${id}`, status: 'completed',
+  trackedDownloadState: 'importBlocked', seriesId: 1, statusMessages: [{ title: `Release.${id}`, messages }], ...extra });
+const ARCHIVE = 'Found archive file, might need to be extracted';
+
+test('A1: archive default replaces after the age gate even when importBlocked', async () => {
+  const h = harness(), st = state(); queued(h, [blocked(1, [ARCHIVE])]);
+  await h.processApp(sonarr, st); assert.equal(deletes(h).length, 0);
+  h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /blocklist=true&skipRedownload=false/);
+  assert.ok(h.logs.some(l => l.includes('REMOVED+REPLACE')));
+});
+
+test('A2: ARCHIVE_ACTION=notify leaves the item and names the setting', async () => {
+  const h = harness({ ARCHIVE_ACTION: 'notify' }), st = state(); queued(h, [blocked(1, [ARCHIVE])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('ARCHIVE_ACTION')));
+});
+
+test('A3: dangerous file default replaces; sample default notifies', async () => {
+  const h = harness(), st = state();
+  queued(h, [blocked(1, ['Caution: Found executable file']), blocked(2, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1); assert.equal(JSON.stringify(deletes(h)[0].body), JSON.stringify({ ids: [1] }));
+  assert.ok(h.logs.some(l => l.includes('Release.2') && l.includes('SAMPLE_ACTION')));
+});
+
+test('A4: loop guard turns replace into a no-search removal after the limit', async () => {
+  const h = harness({ LOOP_GUARD_LIMIT: '1' }), st = state(); queued(h, [blocked(1, [ARCHIVE])]);
+  st.blocklistCount['release.1'] = 1;
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.match(deletes(h)[0].url, /skipRedownload=true/);
+});
+
+test('A5: candidate-level not-an-upgrade routes through NOT_UPGRADE_ACTION', async () => {
+  const h = harness(), st = state();
+  h.candidates = [{ path: '/x.mkv', series: { id: 1 }, episodes: [{ id: 9 }],
+    rejections: [{ reason: 'Not an upgrade for existing episode file(s). Existing quality: WEBDL-720p. New Quality WEBDL-1080p.' }] }];
+  queued(h, [blocked(1, ['matched to series by ID'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1); assert.match(deletes(h)[0].url, /skipRedownload=true/);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+});
+
+test('A6: a mixed candidate set imports the clean file and leaves the rest', async () => {
+  const h = harness(), st = state();
+  h.candidates = [{ path: '/a.mkv', series: { id: 1 }, episodes: [{ id: 1 }], rejections: [] },
+    { path: '/b.mkv', series: { id: 1 }, episodes: [{ id: 2 }], rejections: [{ reason: 'Not an upgrade for existing episode file(s)' }] }];
+  queued(h, [blocked(1, ['matched to series by ID'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  const cmd = h.calls.find(c => c.url === '/command');
+  assert.equal(cmd.body.files.length, 1); assert.equal(deletes(h).length, 0);
+});
+
+test('A7: invalid action values fail startup with the setting name', () => {
+  for (const key of ['ARCHIVE_ACTION', 'DANGEROUS_FILE_ACTION', 'SAMPLE_ACTION', 'NOT_UPGRADE_ACTION'])
+    assert.throws(() => harness({ [key]: 'research' }), new RegExp(key));
+});
+
+test('A8: dry run logs the intended action and sends nothing', async () => {
+  const h = harness({ DRY_RUN: 'true' }), st = state(); queued(h, [blocked(1, [ARCHIVE])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 0); assert.ok(h.logs.some(l => l.includes('DRY-RUN')));
+});
+
+// ---------- notifications ----------
+const notifier = (env = {}) => harness({ NOTIFY_URL: 'http://hook.invalid/x', NOTIFY_FORMAT: 'json', ...env });
+const at = (y, m, d, h, min = 0) => new Date(y, m - 1, d, h, min).getTime(); // local time, like the service
+function clock(h, ts) { h.setNow(ts); }
+const bodyOf = post => JSON.parse(post.body);
+
+test('N1: every format produces its documented body and headers', () => {
+  const h = notifier({ NOTIFY_TOKEN: 'tok', NOTIFY_EXTRA_JSON: '{"username":"plungarr"}' });
+  const items = [{ category: 'attention', app: 'sonarr', title: 'Release.1', reason: 'x', hint: null }];
+  const build = f => h.buildPayload(f, 'T', 'line one', items, { username: 'plungarr' }, 'tok');
+  const discord = build('discord'); assert.equal(JSON.parse(discord.bodies[0]).content, 'line one');
+  assert.equal(JSON.parse(discord.bodies[0]).username, 'plungarr');
+  assert.equal(JSON.parse(build('slack').bodies[0]).text, 'line one');
+  const ntfy = build('ntfy'); assert.equal(ntfy.bodies[0], 'line one'); assert.equal(ntfy.headers.Title, 'T');
+  assert.equal(ntfy.headers.Authorization, 'Bearer tok');
+  const gotify = build('gotify'); const g = JSON.parse(gotify.bodies[0]);
+  assert.equal(g.title, 'T'); assert.equal(g.message, 'line one'); assert.equal(typeof g.priority, 'number');
+  assert.equal(gotify.headers['X-Gotify-Key'], 'tok');
+  const a = JSON.parse(build('apprise').bodies[0]); assert.equal(a.title, 'T'); assert.equal(a.body, 'line one'); assert.equal(a.type, 'info');
+  const j = JSON.parse(build('json').bodies[0]); assert.equal(j.source, 'plungarr'); assert.equal(j.items.length, 1); assert.equal(j.title, 'T');
+  assert.equal(build('json').headers.Authorization, 'Bearer tok');
+});
+
+test('N2: discord splits long text at line boundaries under 2000 characters', () => {
+  const h = notifier();
+  const text = Array.from({ length: 60 }, (_, i) => `line ${i} ` + 'x'.repeat(80)).join('\n');
+  const { bodies } = h.buildPayload('discord', 'T', text, [], {}, '');
+  assert.ok(bodies.length >= 3);
+  for (const b of bodies) { const c = JSON.parse(b).content; assert.ok(c.length <= 2000); assert.ok(!c.startsWith('x')); }
+  assert.equal(bodies.map(b => JSON.parse(b).content).join('\n'), text);
+});
+
+test('N3: immediate attention lines from one cycle go out as a single POST', async () => {
+  const h = notifier(), st = state();
+  queued(h, [blocked(1, ['Sample']), blocked(2, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  const j = bodyOf(h.posts[0]); assert.ok(j.text.includes('Release.1') && j.text.includes('Release.2'));
+  assert.equal(j.items.filter(i => i.category === 'attention').length, 2);
+});
+
+test('N4: an unchanged attention item is not resent until the reminder window passes', async () => {
+  const h = notifier({ NOTIFY_REMIND_DAYS: '2' }), st = state();
+  queued(h, [blocked(1, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  h.advance(60); await h.processApp(sonarr, st); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  h.advance(3 * 24 * 60); await h.processApp(sonarr, st); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 2);
+  const h0 = notifier({ NOTIFY_REMIND_DAYS: '0' }), st0 = state();
+  queued(h0, [blocked(1, ['Sample'])]);
+  await h0.processApp(sonarr, st0); h0.advance(6); await h0.processApp(sonarr, st0); await h0.notifyFlush(st0);
+  h0.advance(30 * 24 * 60); await h0.processApp(sonarr, st0); await h0.notifyFlush(st0);
+  assert.equal(h0.posts.length, 1);
+});
+
+test('N5: a daily category waits for the digest hour and sends once', async () => {
+  const h = notifier({ NOTIFY_ACTIONS: 'daily', NOTIFY_ATTENTION: 'none' }), st = state();
+  clock(h, at(2026, 3, 10, 7)); st.notify = { pending: {}, seen: {}, lastDigest: { daily: at(2026, 3, 9, 8, 1) }, counters: {} };
+  h.log('sonarr', 'IMPORTED', 'Release.1', '1 file(s)');
+  await h.notifyFlush(st); assert.equal(h.posts.length, 0);
+  clock(h, at(2026, 3, 10, 8, 5)); await h.notifyFlush(st); assert.equal(h.posts.length, 1);
+  assert.ok(bodyOf(h.posts[0]).text.includes('Release.1'));
+  clock(h, at(2026, 3, 10, 8, 10)); h.log('sonarr', 'IMPORTED', 'Release.2', '1 file(s)');
+  await h.notifyFlush(st); assert.equal(h.posts.length, 1);
+});
+
+test('N6: weekly and monthly slots follow the configured day, and a missed window sends on the next flush', async () => {
+  // 2026-03-10 is a Tuesday; NOTIFY_DIGEST_DAY=monday => slot was 2026-03-09 08:00
+  const h = notifier({ NOTIFY_PROBLEMS: 'weekly', NOTIFY_CORRUPTION: 'monthly', NOTIFY_ATTENTION: 'none',
+    NOTIFY_DIGEST_DAY: 'monday', NOTIFY_DIGEST_DAY_OF_MONTH: '5' }), st = state();
+  clock(h, at(2026, 3, 10, 12));
+  st.notify = { pending: {}, seen: {}, lastDigest: { weekly: at(2026, 3, 2, 8, 1), monthly: at(2026, 3, 5, 8, 1) }, counters: {} };
+  h.log('sonarr', 'PROBLEM', 'Show S01E01', '3 failed grab(s)');
+  h.log('radarr', 'CORRUPT-NOTIFY', 'Movie: file.mkv', 'stub');
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  const text = bodyOf(h.posts[0]).text;
+  assert.ok(text.includes('Show S01E01')); assert.ok(!text.includes('file.mkv'));
+  clock(h, at(2026, 4, 5, 8, 30)); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 2); assert.ok(bodyOf(h.posts[1]).text.includes('file.mkv'));
+});
+
+test('N7: categories sharing a slot merge into one message with a section each', async () => {
+  const h = notifier({ NOTIFY_ACTIONS: 'daily', NOTIFY_PROBLEMS: 'daily', NOTIFY_ATTENTION: 'none' }), st = state();
+  clock(h, at(2026, 3, 10, 9)); st.notify = { pending: {}, seen: {}, lastDigest: { daily: at(2026, 3, 9, 8, 1) }, counters: {} };
+  h.log('sonarr', 'IMPORTED', 'Release.1', '1 file(s)');
+  h.log('sonarr', 'PROBLEM', 'Show S01E01', '3 failed grab(s)');
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  const text = bodyOf(h.posts[0]).text;
+  assert.ok(/Actions taken/.test(text) && /Chronic failures/.test(text), text);
+});
+
+test('N8: the summary reports period counters and resets them after sending', async () => {
+  const h = notifier({ NOTIFY_SUMMARY: 'daily', NOTIFY_ACTIONS: 'none', NOTIFY_ATTENTION: 'none' }), st = state();
+  clock(h, at(2026, 3, 10, 7)); st.notify = { pending: {}, seen: {}, lastDigest: { daily: at(2026, 3, 9, 8, 1) }, counters: {} };
+  h.log('sonarr', 'IMPORTED', 'Release.1', '1 file(s)'); h.log('sonarr', 'IMPORTED', 'Release.2', '1 file(s)');
+  h.log('sonarr', 'REMOVED+REPLACE', 'Release.3', 'archive not extracted');
+  await h.notifyFlush(st); assert.equal(h.posts.length, 0);
+  clock(h, at(2026, 3, 10, 8, 5)); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  const text = bodyOf(h.posts[0]).text;
+  assert.ok(text.includes('imported: 2') && text.includes('replaced: 1'), text);
+  assert.equal(st.notify.counters.imported || 0, 0);
+});
+
+test('N9: a failed delivery keeps the items, logs one error, and retries next flush without recursing', async () => {
+  const h = notifier(), st = state();
+  queued(h, [blocked(1, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  h.fixture.post = async () => { throw new Error('boom'); };
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 0);
+  assert.equal(h.logs.filter(l => l.includes('NOTIFY-ERROR')).length, 1);
+  h.fixture.post = async (url, headers, body) => { h.posts.push({ url, headers, body }); };
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  const j = bodyOf(h.posts[0]);
+  assert.ok(j.text.includes('Release.1')); assert.ok(!j.text.includes('boom'));
+});
+
+test('N10: dry run logs the digest and never posts', async () => {
+  const h = notifier({ DRY_RUN: 'true' }), st = state();
+  queued(h, [blocked(1, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY-DIGEST') && l.includes('dry-run')));
+});
+
+test('N11: invalid notification settings fail startup with the setting name', () => {
+  for (const [key, value] of [
+    ['NOTIFY_FORMAT', 'email'], ['NOTIFY_URL', 'nope'], ['NOTIFY_URL', 'ftp://x'], ['NOTIFY_ATTENTION', 'hourly'],
+    ['NOTIFY_ERRORS', 'x'], ['NOTIFY_ACTIONS', 'x'], ['NOTIFY_PROBLEMS', 'x'], ['NOTIFY_CORRUPTION', 'x'],
+    ['NOTIFY_SUMMARY', 'x'], ['NOTIFY_HEARTBEAT', 'x'],
+    ['NOTIFY_DIGEST_HOUR', '24'], ['NOTIFY_DIGEST_DAY', 'funday'], ['NOTIFY_DIGEST_DAY_OF_MONTH', '31'],
+    ['NOTIFY_REMIND_DAYS', '-1'], ['NOTIFY_EXTRA_JSON', '[1]'], ['NOTIFY_EXTRA_JSON', '{bad'],
+  ]) assert.throws(() => harness({ [key]: value }), new RegExp(key), `${key}=${value}`);
+});
+
+test('N12: without NOTIFY_URL nothing is queued or posted', async () => {
+  const h = harness(), st = state();
+  queued(h, [blocked(1, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 0);
+  assert.equal(Object.keys((st.notify && st.notify.pending) || {}).length, 0);
+});
+
+test('N13: heartbeat sends a digest even when nothing else happened', async () => {
+  const h = notifier({ NOTIFY_HEARTBEAT: 'daily', NOTIFY_ATTENTION: 'none' }), st = state();
+  clock(h, at(2026, 3, 10, 8, 5)); st.notify = { pending: {}, seen: {}, lastDigest: { daily: at(2026, 3, 9, 8, 1) }, counters: {} };
+  await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  assert.ok(/alive/i.test(bodyOf(h.posts[0]).text));
 });

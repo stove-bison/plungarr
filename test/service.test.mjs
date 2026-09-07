@@ -16,8 +16,14 @@ async function runService(overrides = {}) {
   fs.writeFileSync(stateFile, initial);
   const calls = [];
   const server = http.createServer((req, res) => {
-    calls.push({ method: req.method, url: req.url, key: req.headers['x-api-key'] });
+    const call = { method: req.method, url: req.url, key: req.headers['x-api-key'], body: '' };
+    calls.push(call);
     res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/notify') {
+      req.on('data', chunk => { call.body += chunk; });
+      req.on('end', () => res.end('{}'));
+      return;
+    }
     if (req.url.startsWith('/api/v3/queue?')) return res.end(JSON.stringify({ page: 1, totalRecords: 0, records: [] }));
     if (req.url === '/api/v3/series') return res.end(JSON.stringify([{ id: 1, title: 'Example', statistics: { episodeFileCount: 1 } }]));
     if (req.url === '/api/v3/episodefile?seriesId=1') return res.end(JSON.stringify([
@@ -41,7 +47,8 @@ async function runService(overrides = {}) {
     const child = spawn(process.execPath, [path.join(project, 'janitor.mjs')], {
       cwd: project, env: { ...env, SONARR_URL: `http://127.0.0.1:${server.address().port}`,
         SONARR_API_KEY: 'fixture-key', RUN_ONCE: 'true', FAIL_REVIEW_ENABLED: 'false',
-        STATE_FILE: stateFile, ...overrides }, windowsHide: true,
+        STATE_FILE: stateFile, ...Object.fromEntries(Object.entries(overrides).map(([k, v]) =>
+          [k, String(v).replace('PORT', String(server.address().port))])) }, windowsHide: true,
     });
     let output = '';
     child.stdout.on('data', chunk => { output += chunk; });
@@ -64,6 +71,17 @@ test('service starts, reports suspect media, and completes one cycle without lib
   assert.match(result.output, /CORRUPT-NOTIFY/);
   assert.ok(result.calls.length >= 3);
   assert.ok(result.calls.every(c => c.method === 'GET' && c.key === 'fixture-key'));
+});
+
+test('NOTIFY_URL receives a startup message and the cycle digest over real HTTP', async () => {
+  const result = await runService({ NOTIFY_URL: 'http://127.0.0.1:PORT/notify', NOTIFY_FORMAT: 'json',
+    NOTIFY_CORRUPTION: 'immediate' });
+  assert.equal(result.code, 0, result.output);
+  const posts = result.calls.filter(c => c.method === 'POST' && c.url === '/notify');
+  assert.ok(posts.length >= 2, result.output);
+  assert.match(JSON.parse(posts[0].body).title, /plungarr online/);
+  assert.ok(posts.slice(1).some(p => JSON.parse(p.body).items.some(i => i.category === 'corruption')));
+  assert.ok(posts.every(p => p.key === undefined));
 });
 
 test('dry-run service leaves the live state file unchanged', async () => {

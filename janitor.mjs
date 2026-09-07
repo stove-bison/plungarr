@@ -61,6 +61,33 @@ function boolEnv(key, fallback) {
   if (/^(0|false|no)$/i.test(value)) return false;
   throw new Error(`Invalid ${key}: expected true or false`);
 }
+function choiceEnv(key, fallback, values) {
+  const value = String(env(key, fallback)).trim().toLowerCase();
+  if (!values.includes(value)) throw new Error(`Invalid ${key}: expected one of ${values.join(', ')}`);
+  return value;
+}
+const ACTION_VALUES = ['replace', 'discard', 'notify'];
+const actionEnv = (key, fallback) => choiceEnv(key, fallback, ACTION_VALUES);
+const CADENCE_VALUES = ['immediate', 'daily', 'weekly', 'monthly', 'none'];
+const cadenceEnv = (key, fallback) => choiceEnv(key, fallback, CADENCE_VALUES);
+const NOTIFY_FORMATS = ['discord', 'slack', 'ntfy', 'gotify', 'apprise', 'json'];
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+function urlEnv(key) {
+  const raw = env(key, '').trim();
+  if (!raw) return '';
+  let u;
+  try { u = new URL(raw); } catch { u = null; }
+  if (!u || !/^https?:$/.test(u.protocol)) throw new Error(`Invalid ${key}: expected an http(s) URL`);
+  return raw;
+}
+function jsonObjectEnv(key) {
+  const raw = env(key, '').trim();
+  if (!raw) return {};
+  let v;
+  try { v = JSON.parse(raw); } catch { v = null; }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`Invalid ${key}: expected a JSON object`);
+  return v;
+}
 const CONFIG = {
   apps: [
     { name: 'sonarr', url: env('SONARR_URL', ''), key: env('SONARR_API_KEY', ''), kind: 'series' },
@@ -72,6 +99,16 @@ const CONFIG = {
   runOnce: boolEnv('RUN_ONCE', false),
   stateFile: env('STATE_FILE', '/state/janitor-state.json'),
   loopGuardLimit: numberEnv('LOOP_GUARD_LIMIT', 2, 0, Number.MAX_SAFE_INTEGER, true),
+  // What to do with blocks plungarr recognises but that need a policy choice:
+  //   replace = remove + blocklist + search for a different release (loop guard applies)
+  //   discard = remove + blocklist, keep the existing library file, no new search
+  //   notify  = leave it alone and report it
+  actions: {
+    archive: actionEnv('ARCHIVE_ACTION', 'replace'),
+    dangerous: actionEnv('DANGEROUS_FILE_ACTION', 'replace'),
+    sample: actionEnv('SAMPLE_ACTION', 'notify'),
+    not_upgrade: actionEnv('NOT_UPGRADE_ACTION', 'discard'),
+  },
   sab: {
     url: env('SABNZBD_URL', '').replace(/\/$/, ''),
     key: env('SABNZBD_API_KEY', ''),
@@ -86,6 +123,25 @@ const CONFIG = {
     everyHours: numberEnv('FAIL_REVIEW_HOURS', 6, Number.MIN_VALUE),
     windowHours: numberEnv('FAIL_REVIEW_WINDOW_HOURS', 48, Number.MIN_VALUE),
     failLimit: numberEnv('FAIL_REVIEW_FAIL_LIMIT', 3, 1, Number.MAX_SAFE_INTEGER, true),
+  },
+  notify: {
+    url: urlEnv('NOTIFY_URL'),
+    format: choiceEnv('NOTIFY_FORMAT', 'json', NOTIFY_FORMATS),
+    token: env('NOTIFY_TOKEN', ''),
+    extra: jsonObjectEnv('NOTIFY_EXTRA_JSON'),
+    hour: numberEnv('NOTIFY_DIGEST_HOUR', 8, 0, 23, true),
+    day: WEEKDAYS.indexOf(choiceEnv('NOTIFY_DIGEST_DAY', 'monday', WEEKDAYS)),
+    dayOfMonth: numberEnv('NOTIFY_DIGEST_DAY_OF_MONTH', 1, 1, 28, true),
+    remindDays: numberEnv('NOTIFY_REMIND_DAYS', 7, 0, Number.MAX_SAFE_INTEGER, true),
+    cadence: {
+      attention: cadenceEnv('NOTIFY_ATTENTION', 'immediate'),
+      errors: cadenceEnv('NOTIFY_ERRORS', 'immediate'),
+      actions: cadenceEnv('NOTIFY_ACTIONS', 'daily'),
+      problems: cadenceEnv('NOTIFY_PROBLEMS', 'daily'),
+      corruption: cadenceEnv('NOTIFY_CORRUPTION', 'weekly'),
+      summary: cadenceEnv('NOTIFY_SUMMARY', 'none'),
+      heartbeat: cadenceEnv('NOTIFY_HEARTBEAT', 'none'),
+    },
   },
   corrupt: {
     enabled: boolEnv('CORRUPT_SWEEP_ENABLED', true),
@@ -109,9 +165,30 @@ const IGNORABLE = [
 const RX_EMPTY = /No files found are eligible for import/i;
 const RX_SEASON_BUNDLE = /Single episode file contains all episodes/i;
 const RX_NOT_UPGRADE = /do not improve on Existing|Not an? (Custom Format )?upgrade for existing/i;
+// Message texts below are identical in Sonarr and Radarr (DownloadedEpisodesImportService /
+// DownloadedMovieImportService and the NotSampleSpecification in each).
+const RX_ARCHIVE = /Found archive file, might need to be extracted/i;
+const RX_DANGEROUS = /Caution: Found (potentially dangerous|executable) file/i;
+const RX_SAMPLE = /^\s*Sample\s*$/i; // exact; "Unable to determine if file is a sample" stays ignorable
+const ACTION_SETTING = {
+  archive: 'ARCHIVE_ACTION', dangerous: 'DANGEROUS_FILE_ACTION',
+  sample: 'SAMPLE_ACTION', not_upgrade: 'NOT_UPGRADE_ACTION',
+};
+const ACTION_REASON = {
+  archive: 'archive not extracted', dangerous: 'dangerous or executable file',
+  sample: 'flagged as a sample', not_upgrade: 'not an upgrade for the existing file',
+};
 
-const log = (app, action, title, detail = '') =>
+const log = (app, action, title, detail = '') => {
   console.log(`${new Date().toISOString()} | ${app} | ${action} | ${title}${detail ? ' | ' + detail : ''}`);
+  notifyCapture(app, action, title, detail);
+};
+// Errors go to stderr and into the notifier's "errors" category. Delivery
+// failures inside the notifier itself pass capture=false so they cannot loop.
+const logError = (app, action, detail, capture = true) => {
+  console.error(`${new Date().toISOString()} | ${app} | ${action} | ${detail}`);
+  if (capture) notifyCapture(app, action, detail, '');
+};
 
 // ---------- state (first-seen ages + blocklist loop guard) ----------
 function loadState() {
@@ -130,7 +207,7 @@ function saveState(st) {
   try {
     fs.mkdirSync(path.dirname(CONFIG.stateFile), { recursive: true });
     fs.writeFileSync(CONFIG.stateFile, JSON.stringify(st));
-  } catch (e) { console.error('state save failed:', e.message); }
+  } catch (e) { logError('state', 'STATE-ERROR', 'state save failed: ' + e.message); }
 }
 const normTitle = t => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '.');
 
@@ -160,7 +237,10 @@ function classify(rec) {
   if (!msgs.length) return null; // quietly waiting for the import scanner — not ours
   if (msgs.some(m => RX_EMPTY.test(m))) return 'dead_empty';
   if (msgs.some(m => RX_SEASON_BUNDLE.test(m))) return 'dead_bundle';
+  if (msgs.some(m => RX_DANGEROUS.test(m))) return 'dangerous';
+  if (msgs.some(m => RX_ARCHIVE.test(m))) return 'archive';
   if (msgs.some(m => RX_NOT_UPGRADE.test(m))) return 'not_upgrade';
+  if (msgs.some(m => RX_SAMPLE.test(m))) return 'sample';
   if (msgs.every(m => IGNORABLE.some(rx => rx.test(m)))) return 'verified_import';
   return 'unknown';
 }
@@ -179,11 +259,19 @@ async function verifiedImport(app, rec) {
     log(app.name, 'NOTIFY', rec.title, 'no manual-import candidates despite importable classification');
     return false;
   }
-  const files = [];
+  // A candidate the arr rejects for a reason plungarr has a policy for
+  // (not an upgrade, sample) is skipped here; if nothing else is importable
+  // the whole download is handed back to processApp() as that class so the
+  // configured *_ACTION applies. Any other rejection is a human's call.
+  const files = [], skipped = new Set();
   for (const c of cands) {
     const rej = (c.rejections || []).map(x => x.reason || x)
       .filter(x => !IGNORABLE.some(rx => rx.test(x)));
-    if (rej.length) { log(app.name, 'NOTIFY', c.relativePath || rec.title, 'unexpected rejection: ' + rej.join('; ')); return false; }
+    if (rej.length) {
+      if (rej.every(r => RX_NOT_UPGRADE.test(r))) { skipped.add('not_upgrade'); continue; }
+      if (rej.every(r => RX_SAMPLE.test(r))) { skipped.add('sample'); continue; }
+      log(app.name, 'NOTIFY', c.relativePath || rec.title, 'unexpected rejection: ' + rej.join('; ')); return false;
+    }
     if (app.kind === 'series') {
       if (!c.series || c.series.id !== rec.seriesId || !(c.episodes || []).length) {
         log(app.name, 'NOTIFY', c.relativePath || rec.title,
@@ -210,10 +298,40 @@ async function verifiedImport(app, rec) {
       });
     }
   }
+  if (!files.length) {
+    if (skipped.size === 1) return [...skipped][0];
+    log(app.name, 'NOTIFY', rec.title, 'candidates rejected for mixed reasons: ' + [...skipped].join(', '));
+    return false;
+  }
   if (CONFIG.dryRun) return log(app.name, 'DRY-RUN import', rec.title, `${files.length} file(s)`), true;
   await api(app, 'POST', '/command', { name: 'ManualImport', files, importMode: 'auto' });
   log(app.name, 'IMPORTED', rec.title, `${files.length} file(s) sent to ManualImport`);
   return true;
+}
+
+// Apply a policy to one download (all queue records sharing its downloadId).
+// `action` is replace | discard | notify; `cls` names the block.
+async function applyAction(app, st, gateKey, group, rec, action, cls) {
+  const reason = ACTION_REASON[cls] || cls;
+  const setting = ACTION_SETTING[cls];
+  const dry = CONFIG.dryRun ? 'DRY-RUN ' : '';
+  if (action === 'notify') {
+    log(app.name, 'NOTIFY', rec.title, `${reason}; left untouched` +
+      (setting ? ` (set ${setting}=replace or discard to auto-clear)` : ''));
+    return;
+  }
+  if (action === 'replace') {
+    const key = normTitle(rec.title);
+    const n = st.blocklistCount[key] || 0;
+    const research = n < CONFIG.loopGuardLimit;
+    await removeItems(app, group, { blocklist: true, research });
+    if (!CONFIG.dryRun) { st.blocklistCount[key] = n + 1; st.actioned[gateKey] = Date.now(); }
+    log(app.name, dry + (research ? 'REMOVED+REPLACE' : 'REMOVED (loop guard, no replacement search)'), rec.title, reason);
+    return;
+  }
+  await removeItems(app, group, { blocklist: true, research: false });
+  if (!CONFIG.dryRun) st.actioned[gateKey] = Date.now();
+  log(app.name, dry + 'REMOVED (discarded, no replacement search)', rec.title, reason);
 }
 
 // ---------- one cycle for one app ----------
@@ -260,8 +378,10 @@ async function processApp(app, st) {
     // and halted awaiting intervention (TrackedDownloadState enum), so there
     // is nothing to race: act on first sighting. Transitional states
     // (ImportPending/ImportFailed) keep the two-sighting age gate, since the
-    // arr's own importer may still pick those up mid-move.
-    if (rec.trackedDownloadState !== 'importBlocked') {
+    // arr's own importer may still pick those up mid-move. Policy classes
+    // (archive, dangerous, sample, not_upgrade) always wait one cycle too: a
+    // client with an extractor plugin may still be unpacking after "completed".
+    if (rec.trackedDownloadState !== 'importBlocked' || cls in ACTION_SETTING) {
       if (!st.firstSeen[gateKey]) { st.firstSeen[gateKey] = now; continue; }
       if (now - st.firstSeen[gateKey] < CONFIG.minAgeMin * 60_000) continue;
     }
@@ -269,20 +389,17 @@ async function processApp(app, st) {
     if (st.actioned[gateKey] && now - st.actioned[gateKey] < 30 * 60_000) continue;
 
     try {
+      let effective = cls;
       if (cls === 'verified_import') {
-        if (await verifiedImport(app, rec) && !CONFIG.dryRun) st.actioned[gateKey] = now;
-      } else if (cls === 'dead_empty' || cls === 'dead_bundle') {
-        const key = normTitle(rec.title);
-        const n = st.blocklistCount[key] || 0;
-        const research = n < CONFIG.loopGuardLimit;
-        await removeItems(app, group, { blocklist: true, research });
-        if (!CONFIG.dryRun) st.blocklistCount[key] = n + 1;
-        if (!CONFIG.dryRun) st.actioned[gateKey] = now;
-        log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + (research ? 'REMOVED+RESEARCH' : 'REMOVED (loop guard, no re-search)'), rec.title, cls);
-      } else if (cls === 'not_upgrade') {
-        await removeItems(app, group, { blocklist: true, research: false });
-        if (!CONFIG.dryRun) st.actioned[gateKey] = now;
-        log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + 'REMOVED (not an upgrade)', rec.title);
+        const result = await verifiedImport(app, rec);
+        if (result === true) { if (!CONFIG.dryRun) st.actioned[gateKey] = now; continue; }
+        if (result === false) continue;
+        effective = result; // every remaining candidate was rejected for one policy reason
+      }
+      if (effective === 'dead_empty' || effective === 'dead_bundle') {
+        await applyAction(app, st, gateKey, group, rec, 'replace', effective);
+      } else if (effective in ACTION_SETTING) {
+        await applyAction(app, st, gateKey, group, rec, CONFIG.actions[effective], effective);
       } else {
         log(app.name, 'NOTIFY', rec.title,
           'unrecognized block, left untouched: ' +
@@ -372,7 +489,7 @@ async function corruptSweepInner(st) {
       const flagged = await corruptSweepApp(app);
       log(app.name, 'CORRUPT-SWEEP-DONE', `${flagged} file(s) flagged`, 'report-only; no files deleted');
     } catch (e) {
-      console.error(`${new Date().toISOString()} | ${app.name} | CORRUPT-SWEEP-ERROR | ${e.message}`);
+      logError(app.name, 'CORRUPT-SWEEP-ERROR', e.message);
     }
   }
 }
@@ -409,7 +526,7 @@ async function stallRemove(st, nzoId, slotName, why, confirm = async () => true)
     if (!await confirm()) return false;
     await removeItems(app, group, { blocklist: true, research });
     if (!CONFIG.dryRun) st.blocklistCount[key] = n + 1;
-    log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + (research ? `${why}-REMOVED+RESEARCH` : `${why}-REMOVED (loop guard, no re-search)`), group[0].title);
+    log(app.name, (CONFIG.dryRun ? 'DRY-RUN ' : '') + (research ? `${why}-REMOVED+REPLACE` : `${why}-REMOVED (loop guard, no replacement search)`), group[0].title);
     return true;
   }
   if (!await confirm()) return false;
@@ -628,6 +745,194 @@ async function failReviewInner(st) {
   if (keys.length > 2000) for (const k of keys.slice(0, keys.length - 1000)) delete st.failReported[k];
 }
 
+// ---------- notifications ----------
+// Every log line is classified into a category. Lines land in an in-memory
+// buffer; notifyFlush() (end of each cycle) moves them into the state file,
+// applies attention de-duplication, and sends whatever is due for its
+// cadence: immediate lines go now, daily/weekly/monthly lines wait for their
+// slot. Delivery failures keep the items queued for the next cycle.
+const CATEGORY_ORDER = ['attention', 'errors', 'actions', 'problems', 'corruption', 'summary', 'heartbeat'];
+const CATEGORY_LABEL = { attention: 'Needs attention', errors: 'Errors', actions: 'Actions taken',
+  problems: 'Chronic failures', corruption: 'Suspect library files', summary: 'Summary', heartbeat: 'Heartbeat' };
+const notifyBuffer = [];
+
+function categoryOf(action) {
+  if (action.startsWith('DRY-RUN')) return null;
+  if (action === 'NOTIFY' || action === 'STALL-NOTIFY') return 'attention';
+  if (/ERROR$/.test(action)) return 'errors';
+  if (action === 'PROBLEM') return 'problems';
+  if (action === 'CORRUPT-NOTIFY') return 'corruption';
+  if (action === 'IMPORTED' || /^REMOVED|-REMOVED|-DELETED/.test(action)) return 'actions';
+  return null;
+}
+
+function counterOf(action) {
+  if (action === 'IMPORTED') return 'imported';
+  if (action.includes('ORPHAN')) return 'orphaned';
+  if (action.startsWith('STALLED-')) return 'stalled';
+  if (action.startsWith('DOOMED-')) return 'doomed';
+  if (action.includes('loop guard')) return 'loopGuard';
+  if (action.includes('+REPLACE')) return 'replaced';
+  if (action.includes('discarded')) return 'discarded';
+  if (/ERROR$/.test(action)) return 'errors';
+  return null;
+}
+
+function notifyCapture(app, action, title, detail) {
+  const category = categoryOf(String(action));
+  if (!category) return;
+  notifyBuffer.push({ ts: Date.now(), category, app, action, title: String(title), detail: String(detail || '') });
+}
+
+// Most recent scheduled instant at or before `now` for a periodic cadence
+// (container local time). A cadence is due when its last digest predates it.
+function lastSlot(cadence, now) {
+  const d = new Date(now);
+  d.setHours(CONFIG.notify.hour, 0, 0, 0);
+  if (cadence === 'daily') {
+    if (d.getTime() > now) d.setDate(d.getDate() - 1);
+  } else if (cadence === 'weekly') {
+    d.setDate(d.getDate() - ((d.getDay() - CONFIG.notify.day + 7) % 7));
+    if (d.getTime() > now) d.setDate(d.getDate() - 7);
+  } else {
+    d.setDate(CONFIG.notify.dayOfMonth);
+    if (d.getTime() > now) d.setMonth(d.getMonth() - 1);
+  }
+  return d.getTime();
+}
+
+function chunkText(text, max) {
+  if (!max || text.length <= max) return [text];
+  const out = [];
+  let cur = '';
+  for (let line of text.split('\n')) {
+    while (line.length > max) { if (cur) { out.push(cur); cur = ''; } out.push(line.slice(0, max)); line = line.slice(max); }
+    if (cur && cur.length + 1 + line.length > max) { out.push(cur); cur = line; }
+    else cur = cur ? cur + '\n' + line : line;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function buildPayload(format, title, text, items, extra, token) {
+  const json = { 'Content-Type': 'application/json' };
+  const bearer = h => (token ? { ...h, Authorization: 'Bearer ' + token } : h);
+  switch (format) {
+    case 'discord':
+      return { headers: json, bodies: chunkText(text, 2000).map(t => JSON.stringify({ content: t, ...extra })) };
+    case 'slack':
+      return { headers: json, bodies: [JSON.stringify({ text, ...extra })] };
+    case 'ntfy': // raw body to the topic URL; extra JSON becomes headers (Priority, Tags, ...)
+      return { headers: bearer({ 'Content-Type': 'text/plain; charset=utf-8', Title: title, ...extra }), bodies: [text] };
+    case 'gotify':
+      return { headers: token ? { ...json, 'X-Gotify-Key': token } : json,
+        bodies: [JSON.stringify({ title, message: text, priority: 5, ...extra })] };
+    case 'apprise':
+      return { headers: bearer(json), bodies: [JSON.stringify({ title, body: text, type: 'info', ...extra })] };
+    default:
+      return { headers: bearer(json), bodies: [JSON.stringify({ source: 'plungarr', title, text, items, ...extra })] };
+  }
+}
+
+async function notifyPost(url, headers, body) {
+  const r = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(30_000) });
+  if (!r.ok) throw new Error(`notify POST -> HTTP ${r.status}`);
+}
+
+async function notifySend(title, text, items) {
+  const { headers, bodies } = buildPayload(CONFIG.notify.format, title, text, items, CONFIG.notify.extra, CONFIG.notify.token);
+  if (CONFIG.dryRun) { log('notify', 'NOTIFY-DIGEST (dry-run)', title, text.replace(/\s+/g, ' ').slice(0, 300)); return; }
+  for (const body of bodies) await notifyPost(CONFIG.notify.url, headers, body);
+}
+
+const itemLine = ev => `- [${ev.app}] ${ev.action === 'NOTIFY' || ev.action === 'PROBLEM' || ev.action === 'CORRUPT-NOTIFY' ? '' : ev.action + ' '}${ev.title}${ev.detail ? ' — ' + ev.detail : ''}`;
+const itemJson = ev => ({ category: ev.category, app: ev.app, action: ev.action, title: ev.title, reason: ev.detail || null,
+  hint: (ev.detail.match(/set ([A-Z_]+_ACTION)=/) || [])[1] || null, at: new Date(ev.ts).toISOString() });
+
+function notifyInit(st) {
+  const n = st.notify = st.notify || {};
+  n.pending = n.pending || {}; n.seen = n.seen || {}; n.lastDigest = n.lastDigest || {}; n.counters = n.counters || {};
+  return n;
+}
+
+async function notifyFlush(st) {
+  const n = notifyInit(st);
+  const now = Date.now();
+  const remindMs = CONFIG.notify.remindDays * 86_400_000;
+  const openNow = new Set();
+  for (const ev of notifyBuffer.splice(0)) {
+    const c = counterOf(ev.action);
+    if (c) n.counters[c] = (n.counters[c] || 0) + 1;
+    if (ev.category === 'attention') {
+      const key = `${ev.app}|${ev.title}|${ev.detail}`.slice(0, 400);
+      openNow.add(key);
+      const last = n.seen[key];
+      if (last === undefined) n.counters.attentionOpened = (n.counters.attentionOpened || 0) + 1;
+      else if (CONFIG.notify.remindDays === 0 || now - last < remindMs) continue;
+      n.seen[key] = now;
+    }
+    if (CONFIG.notify.cadence[ev.category] === 'none') continue;
+    (n.pending[ev.category] = n.pending[ev.category] || []).push(ev);
+  }
+  if (openNow.size) n.openAttention = openNow.size;
+  const keep = Math.max(CONFIG.notify.remindDays * 2, 60) * 86_400_000;
+  for (const [k, ts] of Object.entries(n.seen)) if (now - ts > keep) delete n.seen[k];
+  if (!CONFIG.notify.url) { n.pending = {}; return; }
+
+  const due = new Set(['immediate']);
+  for (const c of ['daily', 'weekly', 'monthly']) if ((n.lastDigest[c] || 0) < lastSlot(c, now)) due.add(c);
+  const sections = [], items = [], sentCats = [];
+  let attention = 0, actions = 0, summarySent = false;
+  for (const cat of CATEGORY_ORDER) {
+    const cadence = CONFIG.notify.cadence[cat];
+    if (cadence === 'none' || !due.has(cadence)) continue;
+    if (cat === 'summary') {
+      const c = n.counters;
+      const since = n.lastDigest[cadence] || n.counters.since || now;
+      sections.push(`## ${CATEGORY_LABEL[cat]} (since ${new Date(since).toISOString().slice(0, 16).replace('T', ' ')})\n` +
+        `imported: ${c.imported || 0}, replaced: ${c.replaced || 0}, discarded: ${c.discarded || 0}, ` +
+        `stalled removed: ${c.stalled || 0}, doomed removed: ${c.doomed || 0}, orphans deleted: ${c.orphaned || 0}, ` +
+        `loop-guard stops: ${c.loopGuard || 0}, attention items opened: ${c.attentionOpened || 0}, ` +
+        `still open: ${n.openAttention || 0}, errors: ${c.errors || 0}`);
+      summarySent = true;
+    } else if (cat === 'heartbeat') {
+      sections.push(`## ${CATEGORY_LABEL[cat]}\nplungarr alive: apps ${CONFIG.apps.map(a => a.name).join(', ')}, ` +
+        `${Object.keys(st.firstSeen || {}).length} item(s) gated, ${n.openAttention || 0} need attention`);
+    } else if (n.pending[cat] && n.pending[cat].length) {
+      const list = n.pending[cat];
+      sections.push(`## ${CATEGORY_LABEL[cat]} (${list.length})\n` + list.map(itemLine).join('\n'));
+      items.push(...list.map(itemJson));
+      sentCats.push(cat);
+      if (cat === 'attention') attention += list.length; else if (cat === 'actions') actions += list.length;
+    }
+  }
+  const periodicDue = [...due].filter(c => c !== 'immediate');
+  if (!sections.length) { for (const c of periodicDue) n.lastDigest[c] = now; return; }
+  const parts = [];
+  if (attention) parts.push(`${attention} need attention`);
+  if (actions) parts.push(`${actions} action(s)`);
+  const title = 'plungarr: ' + (parts.length ? parts.join(', ') : 'digest');
+  try {
+    await notifySend(title, sections.join('\n\n'), items);
+  } catch (e) {
+    logError('notify', 'NOTIFY-ERROR', `delivery failed, will retry next cycle: ${e.message}`, false);
+    return;
+  }
+  for (const cat of sentCats) delete n.pending[cat];
+  for (const c of periodicDue) n.lastDigest[c] = now;
+  if (summarySent) n.counters = { since: now };
+}
+
+async function notifyStartup() {
+  if (!CONFIG.notify.url) return;
+  const cad = CONFIG.notify.cadence;
+  const text = `plungarr online. apps: ${CONFIG.apps.map(a => a.name).join(', ')}; dryRun=${CONFIG.dryRun}; ` +
+    `format=${CONFIG.notify.format}; cadence: ` + CATEGORY_ORDER.map(c => `${c}=${cad[c]}`).join(', ') +
+    `; digest at ${String(CONFIG.notify.hour).padStart(2, '0')}:00 local, weekly ${WEEKDAYS[CONFIG.notify.day]}, monthly day ${CONFIG.notify.dayOfMonth}`;
+  try { await notifySend('plungarr online', text, []); log('notify', 'NOTIFY-STARTUP', 'startup message sent'); }
+  catch (e) { logError('notify', 'NOTIFY-ERROR', `startup message failed: ${e.message}`, false); }
+}
+
 // ---------- main loop ----------
 // In-memory state is the source of truth; the file is best-effort persistence
 // across restarts (an unwritable /state only costs cross-restart memory).
@@ -642,19 +947,21 @@ async function cycleInner() {
   const t0 = Date.now();
   for (const app of CONFIG.apps) {
     try { await processApp(app, state); }
-    catch (e) { console.error(`${new Date().toISOString()} | ${app.name} | CYCLE-ERROR | ${e.message}`); }
+    catch (e) { logError(app.name, 'CYCLE-ERROR', e.message); }
   }
   log('cycle', 'HEARTBEAT', `queues processed in ${Math.round((Date.now() - t0) / 1000)}s`,
     `${Object.keys(state.firstSeen).length} gated, sweep ${sweepRunning ? 'running' : 'idle'}`);
   try { await stallSweep(state); }
-  catch (e) { console.error(`${new Date().toISOString()} | stall-sweep | CYCLE-ERROR | ${e.message}`); }
+  catch (e) { logError('stall-sweep', 'CYCLE-ERROR', e.message); }
   // Normal service cycles continue during reviews; one-shot execution waits
   // for completion. Persist review results after the asynchronous work too.
   const reviews = [
-    corruptSweep(state).catch(e => console.error(`${new Date().toISOString()} | corrupt-sweep | CYCLE-ERROR | ${e.message}`)).finally(() => saveState(state)),
-    failReview(state).catch(e => console.error(`${new Date().toISOString()} | fail-review | CYCLE-ERROR | ${e.message}`)).finally(() => saveState(state)),
+    corruptSweep(state).catch(e => logError('corrupt-sweep', 'CYCLE-ERROR', e.message)).finally(() => saveState(state)),
+    failReview(state).catch(e => logError('fail-review', 'CYCLE-ERROR', e.message)).finally(() => saveState(state)),
   ];
   if (CONFIG.runOnce) await Promise.all(reviews);
+  try { await notifyFlush(state); }
+  catch (e) { logError('notify', 'NOTIFY-ERROR', e.message, false); }
   saveState(state);
 }
 
@@ -663,5 +970,6 @@ if (!CONFIG.apps.length) {
   process.exit(1);
 }
 console.log(`plungarr starting: apps=[${CONFIG.apps.map(a => a.name).join(', ')}] interval=${CONFIG.intervalSec}s minAge=${CONFIG.minAgeMin}m dryRun=${CONFIG.dryRun} corruptSweep=${CONFIG.corrupt.enabled ? `every ${CONFIG.corrupt.sweepHours}h (report-only)` : 'off'} failReview=${CONFIG.failReview.enabled ? `every ${CONFIG.failReview.everyHours}h (>=${CONFIG.failReview.failLimit} fails/${CONFIG.failReview.windowHours}h)` : 'off'} stallWatch=${CONFIG.sab.url && CONFIG.sab.key ? `on (head <${CONFIG.sab.minProgressMb}MB/${CONFIG.sab.stallMin}min, doomed >${Math.round(CONFIG.sab.missingFrac * 100)}% missing, ${CONFIG.sab.maxActions}/cycle)` : 'off (set SABNZBD_URL + SABNZBD_API_KEY)'}`);
+await notifyStartup();
 await cycle();
 if (!CONFIG.runOnce) setInterval(cycle, CONFIG.intervalSec * 1000);
