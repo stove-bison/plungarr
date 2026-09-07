@@ -894,6 +894,9 @@ const itemJson = ev => ({ category: ev.category, app: ev.app, action: ev.action,
 function notifyInit(st) {
   const n = st.notify = st.notify || {};
   n.pending = n.pending || {}; n.seen = n.seen || {}; n.lastDigest = n.lastDigest || {}; n.counters = n.counters || {};
+  // v2: builds before 2026-09-07 recorded "seen" while no receiver was
+  // configured, muting those items for NOTIFY_REMIND_DAYS once one was set.
+  if (n.v !== 2) { n.seen = {}; n.v = 2; }
   return n;
 }
 
@@ -963,6 +966,7 @@ async function notifyFlush(st) {
   const title = 'plungarr: ' + (parts.length ? parts.join(', ') : 'digest');
   try {
     await notifySend(title, sections.join('\n\n'), items);
+    if (!CONFIG.dryRun) log('notify', 'NOTIFY-SENT', title, `${sentCats.join(', ') || 'summary/heartbeat'}; ${items.length} item(s)`);
   } catch (e) {
     logError('notify', 'NOTIFY-ERROR', `delivery failed, will retry next cycle: ${e.message}`, false);
     return;

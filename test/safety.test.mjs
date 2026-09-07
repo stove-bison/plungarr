@@ -717,3 +717,15 @@ test('N16: attention lines seen before NOTIFY_URL or a cadence was set are still
   later.advance(12); await later.processApp(sonarr, st2); await later.notifyFlush(st2);
   assert.equal(later.posts.length, 1);
 });
+
+test('N17: a state file from the pre-v2 notifier has its seen list cleared once, and sends log NOTIFY-SENT', async () => {
+  const h = notifier(), st = state();
+  st.notify = { pending: {}, seen: { 'attention|sonarr|Release.1|flagged as a sample; left untouched (set SAMPLE_ACTION=replace or discard to auto-clear)': Date.now() }, lastDigest: {}, counters: {} };
+  queued(h, [blocked(1, ['Sample'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1);
+  assert.equal(st.notify.v, 2);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY-SENT') && l.includes('attention')));
+  await h.processApp(sonarr, st); await h.notifyFlush(st);
+  assert.equal(h.posts.length, 1, 'v2 seen list is kept after migration');
+});
