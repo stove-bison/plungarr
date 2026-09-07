@@ -1,3 +1,12 @@
+# Multiple Sonarr and Radarr instances
+
+- `SONARR_2_URL` / `SONARR_2_API_KEY` (and `_3` to `_9`, same for `RADARR_`)
+  add further instances to one container. Optional `_NAME` labels each one
+  in logs, digests, and state. Duplicate names or a URL without a key stop
+  startup naming the setting.
+- Configure every instance that shares a SABnzbd: the stall watcher only
+  deletes a download as an orphan when no configured instance owns it.
+
 # Corruption review reporting
 
 - Suspects are reported once per file, and again only if the file changes

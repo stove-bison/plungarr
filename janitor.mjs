@@ -93,11 +93,27 @@ function jsonObjectEnv(key) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`Invalid ${key}: expected a JSON object`);
   return v;
 }
+// Any number of instances per app: SONARR_URL/SONARR_API_KEY is instance 1,
+// SONARR_2_URL/SONARR_2_API_KEY instance 2, and so on (same for RADARR).
+// Optional *_NAME labels the instance in logs, digests and state keys
+// (default sonarr, sonarr-2, ...). Names must be unique: state entries and
+// SAB ownership checks are keyed by them.
+function arrInstances(prefix, kind) {
+  const apps = [];
+  for (let i = 1; i <= 9; i++) {
+    const p = i === 1 ? prefix : `${prefix}_${i}`;
+    const url = env(`${p}_URL`, '').trim(), key = env(`${p}_API_KEY`, '').trim();
+    if (!url && !key) continue;
+    if (!url || !key) throw new Error(`Invalid ${p}_URL/${p}_API_KEY: both are required to enable an instance`);
+    const fallback = i === 1 ? prefix.toLowerCase() : `${prefix.toLowerCase()}-${i}`;
+    const name = env(`${p}_NAME`, fallback).trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(name)) throw new Error(`Invalid ${p}_NAME: use 1-32 letters, digits, dots, dashes or underscores`);
+    apps.push({ name, url, key, kind });
+  }
+  return apps;
+}
 const CONFIG = {
-  apps: [
-    { name: 'sonarr', url: env('SONARR_URL', ''), key: env('SONARR_API_KEY', ''), kind: 'series' },
-    { name: 'radarr', url: env('RADARR_URL', ''), key: env('RADARR_API_KEY', ''), kind: 'movie' },
-  ].filter(a => a.url && a.key),
+  apps: [...arrInstances('SONARR', 'series'), ...arrInstances('RADARR', 'movie')],
   intervalSec: numberEnv('INTERVAL_SECONDS', 300, 1, 2147483),
   minAgeMin: numberEnv('MIN_AGE_MINUTES', 5),
   dryRun: boolEnv('DRY_RUN', false),
@@ -161,6 +177,11 @@ const CONFIG = {
       ['unreadable', 'stub', 'junk_readable', 'tiny_readable', 'scanner_blind']),
   },
 };
+{
+  const names = CONFIG.apps.map(a => a.name);
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup) throw new Error(`Invalid instance names: "${dup}" is used twice; set SONARR_2_NAME / RADARR_2_NAME`);
+}
 // Accept and validate old numeric settings during upgrades. Corruption review
 // is report-only, so these settings can no longer authorize library deletion.
 for (const key of ['CORRUPT_MAX_DELETES', 'CORRUPT_LOOP_LIMIT', 'CORRUPT_MIN_AGE_HOURS']) {
@@ -1020,7 +1041,7 @@ async function cycleInner() {
 }
 
 if (!CONFIG.apps.length) {
-  console.error('No apps configured — set SONARR_URL/SONARR_API_KEY and/or RADARR_URL/RADARR_API_KEY.');
+  console.error('No apps configured — set SONARR_URL/SONARR_API_KEY and/or RADARR_URL/RADARR_API_KEY (add _2, _3 ... for more instances).');
   process.exit(1);
 }
 console.log(`plungarr starting: apps=[${CONFIG.apps.map(a => a.name).join(', ')}] interval=${CONFIG.intervalSec}s minAge=${CONFIG.minAgeMin}m dryRun=${CONFIG.dryRun} corruptSweep=${CONFIG.corrupt.enabled ? `every ${CONFIG.corrupt.sweepHours}h (report-only)` : 'off'} failReview=${CONFIG.failReview.enabled ? `every ${CONFIG.failReview.everyHours}h (>=${CONFIG.failReview.failLimit} fails/${CONFIG.failReview.windowHours}h)` : 'off'} stallWatch=${CONFIG.sab.url && CONFIG.sab.key ? `on (head <${CONFIG.sab.minProgressMb}MB/${CONFIG.sab.stallMin}min, doomed >${Math.round(CONFIG.sab.missingFrac * 100)}% missing, ${CONFIG.sab.maxActions}/cycle)` : 'off (set SABNZBD_URL + SABNZBD_API_KEY)'}`);

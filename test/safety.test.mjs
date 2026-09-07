@@ -729,3 +729,28 @@ test('N17: a state file from the pre-v2 notifier has its seen list cleared once,
   await h.processApp(sonarr, st); await h.notifyFlush(st);
   assert.equal(h.posts.length, 1, 'v2 seen list is kept after migration');
 });
+
+// ---------- multiple arr instances ----------
+test('M1: numbered instances become separate apps with distinct default names', () => {
+  const h = harness({ SONARR_2_URL: 'http://anime.invalid', SONARR_2_API_KEY: 'k2',
+    RADARR_URL: 'http://radarr.invalid', RADARR_API_KEY: 'k3', RADARR_3_URL: 'http://r3.invalid', RADARR_3_API_KEY: 'k4' });
+  assert.equal(h.CONFIG.apps.map(a => `${a.name}:${a.kind}`).join(','), 'sonarr:series,sonarr-2:series,radarr:movie,radarr-3:movie');
+});
+
+test('M2: *_NAME labels an instance and duplicates or half-configured instances fail startup', () => {
+  const h = harness({ SONARR_2_URL: 'http://anime.invalid', SONARR_2_API_KEY: 'k2', SONARR_2_NAME: 'Anime' });
+  assert.equal(h.CONFIG.apps[1].name, 'anime');
+  assert.throws(() => harness({ SONARR_2_URL: 'http://anime.invalid', SONARR_2_API_KEY: 'k2', SONARR_2_NAME: 'sonarr' }), /used twice/);
+  assert.throws(() => harness({ SONARR_2_URL: 'http://anime.invalid' }), /SONARR_2_URL\/SONARR_2_API_KEY/);
+  assert.throws(() => harness({ SONARR_2_URL: 'http://anime.invalid', SONARR_2_API_KEY: 'k2', SONARR_2_NAME: 'a:b' }), /SONARR_2_NAME/);
+});
+
+test('M3: two instances keep separate age gates and actions for the same downloadId', async () => {
+  const h = harness({ SONARR_2_URL: 'http://anime.invalid', SONARR_2_API_KEY: 'k2' }), st = state();
+  const [main, anime] = h.CONFIG.apps;
+  queued(h, [blocked(1, [ARCHIVE])]);
+  await h.processApp(main, st); await h.processApp(anime, st);
+  h.advance(6); await h.processApp(main, st); await h.processApp(anime, st);
+  assert.equal(deletes(h).length, 2);
+  assert.deepEqual(deletes(h).map(d => d.app), ['sonarr', 'sonarr-2']);
+});

@@ -8,7 +8,10 @@ releases that can never import. It also reports suspicious library files for
 manual inspection. What it can't fix safely, it reports and leaves alone.
 
 Single-file Node 22 service, no dependencies. Talks to everything over the
-apps' own HTTP APIs.
+apps' own HTTP APIs. Any number of Sonarr and Radarr instances can be
+configured in one container, which matters if they share a SABnzbd: the
+stall watcher only treats a download as an orphan when no configured
+instance owns it.
 
 ## What it does
 
@@ -145,6 +148,7 @@ Everything is an environment variable with a sane default — see
 |---|---|---|
 | `SONARR_URL` / `SONARR_API_KEY` | — | At least one arr is required |
 | `RADARR_URL` / `RADARR_API_KEY` | — | |
+| `SONARR_2_URL` / `SONARR_2_API_KEY` / `SONARR_2_NAME` | — | Second Sonarr instance (anime, 4K, ...); `_3` to `_9` for more, same for `RADARR_` |
 | `SABNZBD_URL` / `SABNZBD_API_KEY` | — | Optional; enables the stall watcher |
 | `INTERVAL_SECONDS` | 300 | Cycle length |
 | `DRY_RUN` | false | Log intended actions; use fresh memory-only state without reading or writing live state |
