@@ -8,7 +8,7 @@
   --red: #d64541;
   --brass: #c8935a;
   --water: #7fb2e5;
-  --measure: 68ch;
+  --measure: 80ch;
   --sans: "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "Consolas", "SF Mono", Menlo, monospace;
 }
@@ -43,7 +43,7 @@ pre code { background: none; border: 0; padding: 0; white-space: pre; }
   background: var(--panel);
 }
 .top .row {
-  max-width: 88ch;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 0.7rem 1.2rem;
   display: flex;
@@ -59,7 +59,7 @@ nav a:hover { color: var(--text); }
 nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--brass); }
 
 /* Content */
-main { max-width: 88ch; margin: 0 auto; padding: 2rem 1.2rem 4rem; }
+main { max-width: 1180px; margin: 0 auto; padding: 2rem 1.6rem 4rem; }
 main > *, main section > * { max-width: var(--measure); }
 main > pre, main .scroll, main .log, section > pre, section > .scroll, section > .log, .buttons { max-width: none; }
 h1 { font-size: clamp(1.9rem, 4vw, 2.6rem); line-height: 1.15; margin: 0.6rem 0 0.8rem; font-weight: 650; letter-spacing: -0.01em; }
@@ -127,7 +127,7 @@ footer {
   color: var(--muted);
   font-size: 0.92rem;
 }
-footer .row { max-width: 88ch; margin: 0 auto; padding: 1.2rem; display: flex; gap: 1.5rem; flex-wrap: wrap; }
+footer .row { max-width: 1180px; margin: 0 auto; padding: 1.2rem; display: flex; gap: 1.5rem; flex-wrap: wrap; }
 
 @media (max-width: 600px) {
   body { font-size: 16px; }
