@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install · plungarr</title>
+<meta name="description" content="Install plungarr on Unraid or with Docker Compose, add a second Sonarr or Radarr, and keep it updated.">
+<link rel="icon" href="../icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="top"><div class="row">
+  <a class="brand" href="../index.html"><img src="../icon.svg" alt="">plungarr</a>
+  <nav>
+    <a href="install.html" aria-current="page">Install</a>
+    <a href="settings.html">Settings</a>
+    <a href="notifications.html">Notifications</a>
+    <a href="compare.html">Compare</a>
+    <a href="faq.html">FAQ</a>
+    <a href="https://github.com/stove-bison/plungarr">GitHub</a>
+  </nav>
+</div></header>
+<main>
+<h1>Install</h1>
+<p class="lead">You need API keys from Sonarr and/or Radarr (Settings, General, Security). A SABnzbd URL and API key are optional and turn on the stall watcher. Start with <code>DRY_RUN=true</code> for a day if you want to watch first.</p>
+
+<h2 id="unraid">Unraid</h2>
+<p>Search Community Apps for <strong>plungarr</strong> and install. Fill in the Sonarr and Radarr URLs and API keys, and SABnzbd if you use it. Click “Show more settings” for the action policies, notifications, a second instance, and the timezone.</p>
+<p>Until the listing appears in Community Apps, or if you prefer the template file directly, download it into your user templates and it shows up under “Add Container”:</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/stove-bison/plungarr/master/templates/plungarr.xml \
+  -o /boot/config/plugins/dockerMan/templates-user/plungarr.xml</code></pre>
+<p>Reload the Docker page, click “Add Container”, and pick plungarr from the template list.</p>
+<p>State lives in <code>/mnt/user/appdata/plungarr</code>. The container makes that folder writable for the user it runs as (<code>PUID</code>/<code>PGID</code>, default 99/100), so no manual permissions step is needed.</p>
+
+<h3 id="unraid-update">Updating on Unraid</h3>
+<p>Docker tab, “Check for Updates”, then “apply update” on plungarr. Updates pull the new image only. New settings added in later versions do not appear on an existing container's form; add them with “Add another Path, Port, Variable” in Edit, or reinstall from the template.</p>
+
+<h2 id="docker">Docker Compose</h2>
+<pre><code>git clone https://github.com/stove-bison/plungarr.git &amp;&amp; cd plungarr
+cp .env.example .env    # fill in your URLs and API keys
+docker compose up -d --build</code></pre>
+<p>Or use the published image directly:</p>
+<pre><code>services:
+  plungarr:
+    image: ghcr.io/stove-bison/plungarr:latest
+    container_name: plungarr
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./state:/state</code></pre>
+<p>Watch it work:</p>
+<pre><code>docker logs -f plungarr</code></pre>
+
+<h2 id="urls">Which URL to use</h2>
+<p>The URL must be reachable from inside the container. On bridge networking that means the host's LAN address, for example <code>http://192.168.1.20:8989</code>, not <code>localhost</code>, which inside the container is plungarr itself. If an app runs behind a URL base, include it: <code>http://host:8989/sonarr</code>.</p>
+
+<h2 id="instances">Two Sonarrs, or two Radarrs</h2>
+<p>Add numbered instances. <code>SONARR_URL</code> is instance one; <code>SONARR_2_URL</code> and <code>SONARR_2_API_KEY</code> add a second, up to <code>_9</code>. Same for <code>RADARR_</code>. Optional <code>SONARR_2_NAME</code> labels it in logs and digests, for example <code>anime</code>. On Unraid the second-instance fields are under “Show more settings”.</p>
+<div class="note"><p>If both instances share one SABnzbd, configure both in the same plungarr container. The stall watcher only removes a download as an orphan when no configured instance owns it. Two separate containers would each see the other's downloads as ownerless.</p></div>
+
+<h2 id="tz">Timezone</h2>
+<p>Daily, weekly and monthly digests fire at <code>NOTIFY_DIGEST_HOUR</code> in the container's local time. Set <code>TZ</code>, for example <code>Europe/London</code> or <code>America/New_York</code>, or the container runs on UTC.</p>
+
+<h2 id="state">What the state file holds</h2>
+<p><code>/state/janitor-state.json</code> keeps first-seen times for the age gate, blocklist counts for the loop guard, which notifications have been sent, and which library files have already been reported. Losing it costs nothing except a few minutes of re-gating. Dry runs never read or write it.</p>
+
+<h2 id="dev">Running the tests</h2>
+<pre><code>node --check janitor.mjs &amp;&amp; node --test</code></pre>
+<p>Tests use mocked APIs and a local HTTP fixture. They never contact a real Sonarr, Radarr or SABnzbd.</p>
+</main>
+<footer><div class="row">
+  <span>MIT licence</span>
+  <a href="https://github.com/stove-bison/plungarr">Source</a>
+  <a href="https://github.com/stove-bison/plungarr/issues">Issues</a>
+</div></footer>
+</body>
+</html>

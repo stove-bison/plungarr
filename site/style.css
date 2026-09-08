@@ -1,0 +1,136 @@
+/* plungarr site. Palette from icon.svg. No external resources. */
+:root {
+  --ground: #1e2733;
+  --panel: #161d27;
+  --line: #2c3745;
+  --text: #e4e9ef;
+  --muted: #98a4b3;
+  --red: #d64541;
+  --brass: #c8935a;
+  --water: #7fb2e5;
+  --measure: 68ch;
+  --sans: "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Consolas", "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html { color-scheme: dark; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.55;
+}
+a { color: var(--water); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { color: #a9cdf2; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+code, pre, kbd { font-family: var(--mono); font-size: 0.92em; }
+code { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 0 0.3em; white-space: nowrap; }
+pre {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre code { background: none; border: 0; padding: 0; white-space: pre; }
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.top .row {
+  max-width: 88ch;
+  margin: 0 auto;
+  padding: 0.7rem 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 0.55rem; text-decoration: none; color: var(--text); font-weight: 600; font-size: 1.1rem; }
+.brand img { width: 30px; height: 30px; }
+nav { display: flex; gap: 1rem; flex-wrap: wrap; margin-left: auto; }
+nav a { color: var(--muted); text-decoration: none; padding: 0.2rem 0; border-bottom: 2px solid transparent; }
+nav a:hover { color: var(--text); }
+nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--brass); }
+
+/* Content */
+main { max-width: 88ch; margin: 0 auto; padding: 2rem 1.2rem 4rem; }
+main > *, main section > * { max-width: var(--measure); }
+main > pre, main .scroll, main .log, section > pre, section > .scroll, section > .log, .buttons { max-width: none; }
+h1 { font-size: clamp(1.9rem, 4vw, 2.6rem); line-height: 1.15; margin: 0.6rem 0 0.8rem; font-weight: 650; letter-spacing: -0.01em; }
+h2 { font-size: 1.35rem; margin: 2.4rem 0 0.6rem; font-weight: 600; }
+h3 { font-size: 1.08rem; margin: 1.6rem 0 0.4rem; font-weight: 600; }
+p, li { margin: 0 0 0.8rem; }
+ul, ol { padding-left: 1.3rem; }
+.lead { font-size: 1.18rem; color: var(--text); }
+.muted { color: var(--muted); }
+
+/* The log block is the page's one loud element. */
+.log {
+  margin: 1.6rem 0 1.2rem;
+  border-left: 4px solid var(--red);
+  border-radius: 4px;
+}
+.log .app { color: var(--water); }
+.log .act { color: var(--brass); }
+.log .warn { color: var(--red); }
+.log .dim { color: var(--muted); }
+
+/* Tables */
+.scroll { overflow-x: auto; margin: 0.8rem 0 1.2rem; }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+td code { white-space: nowrap; }
+
+/* Callouts. Red border means "this cannot happen"; blue means a note. */
+.never, .note {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 4px;
+  padding: 0.8rem 1rem;
+  margin: 1.2rem 0;
+  background: var(--panel);
+}
+.never { border-left-color: var(--red); }
+.note { border-left-color: var(--water); }
+.never p:last-child, .note p:last-child, .never ul:last-child { margin-bottom: 0; }
+
+/* Buttons */
+.buttons { display: flex; gap: 0.8rem; flex-wrap: wrap; margin: 1.4rem 0; }
+.button {
+  display: inline-block;
+  padding: 0.6rem 1.1rem;
+  border-radius: 4px;
+  text-decoration: none;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  color: var(--text);
+  background: var(--panel);
+}
+.button.primary { background: var(--red); border-color: var(--red); color: #fff; }
+.button.primary:hover { background: #e0524e; color: #fff; }
+.button:hover { border-color: var(--brass); color: var(--text); }
+
+/* Definition-style lists for settings vocab */
+dl { margin: 0.6rem 0 1rem; }
+dt { font-family: var(--mono); font-size: 0.95em; color: var(--brass); margin-top: 0.6rem; }
+dd { margin: 0.15rem 0 0 1.2rem; }
+
+footer {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+footer .row { max-width: 88ch; margin: 0 auto; padding: 1.2rem; display: flex; gap: 1.5rem; flex-wrap: wrap; }
+
+@media (max-width: 600px) {
+  body { font-size: 16px; }
+  nav { margin-left: 0; gap: 0.8rem; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>plungarr · unclog your Sonarr, Radarr and SABnzbd queues</title>
+<meta name="description" content="plungarr watches Sonarr, Radarr and SABnzbd every five minutes, finishes the imports that only needed a nudge, clears the downloads that can never import, and tells you about the rest. It never touches library files.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="row">
+  <a class="brand" href="index.html" aria-current="page"><img src="icon.svg" alt="">plungarr</a>
+  <nav>
+    <a href="docs/install.html">Install</a>
+    <a href="docs/settings.html">Settings</a>
+    <a href="docs/notifications.html">Notifications</a>
+    <a href="docs/compare.html">Compare</a>
+    <a href="docs/faq.html">FAQ</a>
+    <a href="https://github.com/stove-bison/plungarr">GitHub</a>
+  </nav>
+</div></header>
+<main>
+<h1>The queue clears itself.</h1>
+<p class="lead">plungarr checks Sonarr, Radarr and SABnzbd every five minutes. It finishes the imports that only needed a nudge, clears the downloads that can never import, removes dead posts wedged at the head of the SABnzbd queue, and tells you about anything that genuinely needs a decision. It never touches a library file.</p>
+
+<div class="buttons">
+  <a class="button primary" href="docs/install.html#unraid">Install on Unraid</a>
+  <a class="button primary" href="docs/install.html#docker">Install with Docker</a>
+  <a class="button" href="https://github.com/stove-bison/plungarr">Source on GitHub</a>
+</div>
+
+<pre class="log"><code><span class="dim">2026-09-07T14:57:28Z</span> | <span class="app">sonarr</span> | <span class="act">IMPORTED</span> | Example.Show.S02E04.1080p.WEB-DL | 1 file(s) sent to ManualImport
+<span class="dim">2026-09-07T14:57:28Z</span> | <span class="app">sonarr</span> | <span class="act">REMOVED (discarded, no replacement search)</span> | Example.Show.S01E35.1080p.WEB-DL | not an upgrade for the existing file
+<span class="dim">2026-09-07T14:57:28Z</span> | <span class="app">sonarr</span> | <span class="act">REMOVED+REPLACE</span> | Example.Series.S05.720p.BluRay | archive not extracted
+<span class="dim">2026-09-07T14:57:29Z</span> | <span class="app">radarr</span> | <span class="act">IMPORTED</span> | Example.Film.2009.1080p.BluRay | 3 file(s) sent to ManualImport
+<span class="dim">2026-09-07T14:57:29Z</span> | <span class="app">sonarr</span> | <span class="warn">NOTIFY</span> | Example.Kids.Show.S02E02.720p.WEB | flagged as a sample; left untouched (set SAMPLE_ACTION=replace or discard to auto-clear)
+<span class="dim">2026-09-07T14:57:31Z</span> | <span class="app">sab</span> | <span class="act">STALLED-REMOVED+REPLACE</span> | Example.Movie.2019.2160p | head made 0 MB in 45 min
+<span class="dim">2026-09-07T14:57:31Z</span> | <span class="app">sonarr</span> | <span class="warn">PROBLEM</span> | Example Show S06E01 "Pilot" | 19 failed grab(s) in 48h, none imported since
+<span class="dim">2026-09-07T14:57:31Z</span> | <span class="app">cycle</span> | HEARTBEAT | queues processed in 3s | 3 gated, sweep idle</code></pre>
+<p class="muted">One cycle, lightly edited. Titles are made up; the behaviour is not.</p>
+
+<h2 id="every-cycle">What happens every cycle</h2>
+<p>Every stuck download has a reason. For the reasons plungarr recognises, it does what you would do by hand, and the policy for each is a setting.</p>
+<div class="scroll"><table>
+<thead><tr><th>Situation</th><th>What plungarr does</th></tr></thead>
+<tbody>
+<tr><td>Completed download blocked on a technicality: “matched to series/movie by ID”, “unable to determine if sample”</td><td>Verifies every file maps to the exact series or movie that was grabbed, then force-imports. A mapping mismatch is never imported.</td></tr>
+<tr><td>Download that is not an upgrade for the existing file, reported on the queue row or only on the files inside it</td><td><code>NOT_UPGRADE_ACTION</code>, default <strong>discard</strong>: remove and blocklist, keep the library file</td></tr>
+<tr><td>Archive the download client never extracted</td><td><code>ARCHIVE_ACTION</code>, default <strong>replace</strong>: remove, blocklist, search for a different release</td></tr>
+<tr><td>Dangerous or executable file in the download</td><td><code>DANGEROUS_FILE_ACTION</code>, default <strong>replace</strong></td></tr>
+<tr><td>File flagged as a sample</td><td><code>SAMPLE_ACTION</code>, default <strong>notify</strong>, because short-form shows trip the sample detector on real episodes</td></tr>
+<tr><td>“No files found are eligible for import”, or a season pack that is one video file</td><td>Remove, blocklist, search for a replacement</td></tr>
+<tr><td>Dead usenet post at the head of the SABnzbd queue: under 5 MB of progress in 45 minutes, or most articles missing</td><td>Remove through the arr that grabbed it, blocklist, search again. One per cycle, so live downloads keep going.</td></tr>
+<tr><td>Anything else</td><td>Logged, sent to your notifications if configured, and left alone. It never guesses.</td></tr>
+</tbody></table></div>
+
+<div class="never">
+<p><strong>What it never does</strong></p>
+<ul>
+<li>Never deletes a library file. The library review is report-only, always.</li>
+<li>Never imports a file that maps to a different series or movie than the one that was grabbed.</li>
+<li>Never acts on a state it does not recognise. Unknown means notify.</li>
+<li>Never races an import in progress: transitional items must be seen stuck across two cycles first.</li>
+<li><code>DRY_RUN=true</code> logs every intended action and sends nothing.</li>
+</ul>
+</div>
+
+<h2 id="reviews">Twice a day, it looks further</h2>
+<ul>
+<li><strong>Chronic failures.</strong> Every six hours it reads the arrs' history and flags any episode or movie with three or more failed grabs and no successful import since. That is your short list of things that need a human to pick a release.</li>
+<li><strong>Suspect library files.</strong> Once a day it reports an MKV with no media info, a tiny file with no metadata, or a very low bitrate for its length. Each file is reported once. Nothing is deleted.</li>
+</ul>
+
+<h2 id="notify">It tells you, on your schedule</h2>
+<p>Optional digests to Discord, Slack, ntfy, Gotify, Apprise or any JSON endpoint. Each category, from “needs attention” to “what plungarr did this month”, has its own cadence: immediate, daily, weekly, monthly or off. Items still waiting on you are re-sent after a week so nothing sits forgotten. <a href="docs/notifications.html">Notifications</a>.</p>
+
+<h2 id="shape">Small on purpose</h2>
+<p>One Node file, no dependencies, MIT licence. It talks to Sonarr, Radarr and SABnzbd over their own HTTP APIs and needs nothing else. Any number of Sonarr and Radarr instances can be configured in one container. There is no web UI, by design: the policy is set once, and the log and digests are the interface. <a href="docs/faq.html#web-ui">Why</a>.</p>
+</main>
+<footer><div class="row">
+  <span>MIT licence</span>
+  <a href="https://github.com/stove-bison/plungarr">Source</a>
+  <a href="https://github.com/stove-bison/plungarr/issues">Issues</a>
+</div></footer>
+</body>
+</html>

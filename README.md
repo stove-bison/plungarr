@@ -1,5 +1,7 @@
 # plungarr
 
+Docs, install guide and settings reference: https://stove-bison.github.io/plungarr/
+
 Unclogs your Sonarr/Radarr download pipeline. plungarr watches the queues and
 your SABnzbd downloads, and automatically fixes the stuck states that
 otherwise sit there until a human notices: dead usenet posts downloading at

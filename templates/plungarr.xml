@@ -12,7 +12,7 @@
   <Overview>Unclogs your Sonarr/Radarr download pipeline: auto-fixes stuck imports, removes dead usenet posts stalling SABnzbd, blocklists junk releases, flags chronic failures, and reports suspicious library files for manual inspection. What it can't fix safely it reports and leaves alone. Requires Sonarr and/or Radarr API keys; SABnzbd credentials are optional and enable the stall watcher.</Overview>
   <Category>Downloaders: Tools:</Category>
   <TemplateURL>https://raw.githubusercontent.com/stove-bison/plungarr/master/templates/plungarr.xml</TemplateURL>
-  <ReadMe>https://raw.githubusercontent.com/stove-bison/plungarr/master/README.md</ReadMe>
+  <ReadMe>https://stove-bison.github.io/plungarr/docs/install.html</ReadMe>
   <License>MIT</License>
   <ExtraSearchTerms>sonarr radarr sabnzbd queue stuck import stalled janitor</ExtraSearchTerms>
   <Requires>Sonarr and/or Radarr reachable from this container with an API key. SABnzbd is optional.</Requires>

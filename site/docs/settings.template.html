@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings reference · plungarr</title>
+<meta name="description" content="Every plungarr setting with its default and what it does. Generated from the Unraid template and .env.example.">
+<link rel="icon" href="../icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="top"><div class="row">
+  <a class="brand" href="../index.html"><img src="../icon.svg" alt="">plungarr</a>
+  <nav>
+    <a href="install.html">Install</a>
+    <a href="settings.html" aria-current="page">Settings</a>
+    <a href="notifications.html">Notifications</a>
+    <a href="compare.html">Compare</a>
+    <a href="faq.html">FAQ</a>
+    <a href="https://github.com/stove-bison/plungarr">GitHub</a>
+  </nav>
+</div></header>
+<main>
+<h1>Settings reference</h1>
+<p class="lead">Everything is an environment variable with a working default. This page is generated from the Unraid template and <code>.env.example</code> on every deploy, so it cannot drift from the container.</p>
+
+<h2 id="vocabulary">Two vocabularies used below</h2>
+<p>The four <code>*_ACTION</code> settings take one of:</p>
+<dl>
+  <dt>replace</dt><dd>Remove from queue and client, blocklist, search for a different release. The loop guard applies, so the same release title stops being re-searched after <code>LOOP_GUARD_LIMIT</code> blocklists.</dd>
+  <dt>discard</dt><dd>Remove from queue and client, blocklist, keep whatever is already in the library, no new search.</dd>
+  <dt>notify</dt><dd>Leave it alone and report it. The log line names the setting that would auto-clear it.</dd>
+</dl>
+<p>The seven <code>NOTIFY_*</code> category settings take one of:</p>
+<dl>
+  <dt>immediate</dt><dd>Batched within a cycle and sent at the end of it.</dd>
+  <dt>daily, weekly, monthly</dt><dd>Sent at <code>NOTIFY_DIGEST_HOUR</code> on the configured day. Categories sharing a slot are merged into one message.</dd>
+  <dt>none</dt><dd>Never sent. Still logged.</dd>
+</dl>
+
+<!-- SETTINGS -->
+
+<div class="note"><p>Unraid users see the same settings as form fields; the quoted “Unraid” name is the field label. Anything not in the template can be added in the container's Edit view with “Add another Path, Port, Variable”.</p></div>
+</main>
+<footer><div class="row">
+  <span>MIT licence</span>
+  <a href="https://github.com/stove-bison/plungarr">Source</a>
+  <a href="https://github.com/stove-bison/plungarr/issues">Issues</a>
+</div></footer>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAQ · plungarr</title>
+<meta name="description" content="Answers to the questions people ask about plungarr: web UI, safety, AI, torrents, Sonarr instances.">
+<link rel="icon" href="../icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="top"><div class="row">
+  <a class="brand" href="../index.html"><img src="../icon.svg" alt="">plungarr</a>
+  <nav>
+    <a href="install.html">Install</a>
+    <a href="settings.html">Settings</a>
+    <a href="notifications.html">Notifications</a>
+    <a href="compare.html">Compare</a>
+    <a href="faq.html" aria-current="page">FAQ</a>
+    <a href="https://github.com/stove-bison/plungarr">GitHub</a>
+  </nav>
+</div></header>
+<main>
+<h1>Questions people ask</h1>
+
+<h2 id="web-ui">Why is there no web UI?</h2>
+<p>Because there is nothing to click. plungarr applies a policy you set once: for each reason a download can be stuck, replace it, discard it, or leave it and tell you. The log shows what it did, and the digests tell you what still needs a human, with the setting that would auto-clear it. A UI would be a page of the same settings plus a button for an action the service already takes. If you want buttons for one-off actions, <a href="compare.html">Cleanuparr</a> has them.</p>
+
+<h2 id="cleanuparr">Isn't this just Cleanuparr or Decluttarr?</h2>
+<p>They clean the queue. plungarr also finishes the import when the only problem was a technicality, knows the difference between “not an upgrade” and “archive not extracted”, and was built around SABnzbd. They are well ahead on torrents and support more arrs. <a href="compare.html">The comparison</a> is honest about both directions.</p>
+
+<h2 id="sonarr">Shouldn't Sonarr do this itself?</h2>
+<p>Probably, for some of it. Sonarr deliberately stops at “manual import required” when it cannot be certain, and that caution is right for the default. plungarr adds the checks a careful human would make before clicking import, and lets you decide the policy for the rest. If Sonarr grows those checks, plungarr shrinks.</p>
+
+<h2 id="safe">What can go wrong?</h2>
+<p>plungarr can remove a download from your queue and download client, and blocklist a release. It cannot delete a library file, import a file into the wrong series or movie, or act on a state it does not recognise. Run <code>DRY_RUN=true</code> for a day to see every action it would take, and set any <code>*_ACTION</code> to <code>notify</code> to take a reason out of its hands.</p>
+
+<h2 id="torrents">I use qBittorrent, not SABnzbd. Is it useful?</h2>
+<p>Yes for the queue side: import handling and the per-reason policies work through the arr's own API regardless of client. The stall watcher is SABnzbd-only, so a stalled torrent is not something plungarr sees. Leave <code>SABNZBD_URL</code> empty and that part stays off.</p>
+
+<h2 id="instances">I run two Sonarrs, one for anime.</h2>
+<p>Add <code>SONARR_2_URL</code>, <code>SONARR_2_API_KEY</code>, and optionally <code>SONARR_2_NAME=anime</code>. Up to nine of each app, same pattern for Radarr. If both share a SABnzbd, configure both in the one container so the stall watcher knows every owner. <a href="install.html#instances">Details</a>.</p>
+
+<h2 id="notifications">Which notification services are actually tested?</h2>
+<p>ntfy, against a live receiver. The others are implemented from each service's published API and covered by unit tests, but had not been run against a real Discord, Slack, Gotify or Apprise at the time of writing. <a href="notifications.html">The notifications page</a> keeps this status current. If one misbehaves, the log line <code>NOTIFY-ERROR</code> has what is needed to fix it.</p>
+
+<h2 id="ai">Was AI used to build this?</h2>
+<p>Yes. It runs on the author's own library, every action has a regression test that runs before any image is published, and the safety rules on the <a href="../index.html#every-cycle">home page</a> are enforced in tests, not just described. The source is a single readable file if you would rather check for yourself.</p>
+
+<h2 id="samples">It keeps notifying me about a sample that is a real episode.</h2>
+<p>Sonarr's sample detector trips on short-form shows. plungarr defaults <code>SAMPLE_ACTION</code> to notify for exactly that reason. Import the episode by hand in Sonarr, or set <code>SAMPLE_ACTION=discard</code> if you would rather those releases were dropped automatically.</p>
+
+<h2 id="corrupt">The library review flagged a lot of files.</h2>
+<p>By default it reports only the actionable classes: an MKV with no media info, a tiny file with no metadata, or a very low bitrate for its length. Small readable files and unscanned containers such as <code>.avi</code> or <code>.iso</code> are opt-in via <code>CORRUPT_REPORT_CLASSES</code>. Each file is reported once, then again only if it changes. Nothing is ever deleted.</p>
+
+<h2 id="add">It does not handle a block I see all the time.</h2>
+<p><a href="https://github.com/stove-bison/plungarr/issues">Open an issue</a> with the exact message text from the queue. New reasons are added as settings with the same replace, discard, or notify choice.</p>
+</main>
+<footer><div class="row">
+  <span>MIT licence</span>
+  <a href="https://github.com/stove-bison/plungarr">Source</a>
+  <a href="https://github.com/stove-bison/plungarr/issues">Issues</a>
+</div></footer>
+</body>
+</html>

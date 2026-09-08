@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare · plungarr</title>
+<meta name="description" content="How plungarr differs from Cleanuparr and Decluttarr, and where they are ahead.">
+<link rel="icon" href="../icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="top"><div class="row">
+  <a class="brand" href="../index.html"><img src="../icon.svg" alt="">plungarr</a>
+  <nav>
+    <a href="install.html">Install</a>
+    <a href="settings.html">Settings</a>
+    <a href="notifications.html">Notifications</a>
+    <a href="compare.html" aria-current="page">Compare</a>
+    <a href="faq.html">FAQ</a>
+    <a href="https://github.com/stove-bison/plungarr">GitHub</a>
+  </nav>
+</div></header>
+<main>
+<h1>Cleanuparr, Decluttarr, plungarr</h1>
+<p class="lead">All three watch the arr queues and remove downloads that are going nowhere. The difference is what happens to a download that could still be imported, and which download client the tool was built around. Reviewed against both projects' documentation and source in September 2026; corrections welcome as issues.</p>
+
+<h2 id="difference">The one-line difference</h2>
+<p><a href="https://github.com/Cleanuparr/Cleanuparr">Cleanuparr</a> and <a href="https://github.com/ManiMatter/decluttarr">Decluttarr</a> are queue cleaners: they decide a download is bad and remove it. plungarr also finishes the import when the only problem was a technicality, distinguishes the reasons a download is stuck and applies a policy per reason, and was built around SABnzbd.</p>
+
+<h2 id="plungarr">What plungarr does that they do not</h2>
+<div class="scroll"><table>
+<thead><tr><th></th><th>plungarr</th><th>Cleanuparr and Decluttarr</th></tr></thead>
+<tbody>
+<tr><td>“Matched by ID, manual import required”</td><td>Verifies each file maps to the grabbed series or movie, then force-imports</td><td>A message you can choose to remove on. Neither has a manual-import code path.</td></tr>
+<tr><td>Policy per reason</td><td>Not-an-upgrade, archive, dangerous file, and sample each take replace, discard, or notify</td><td>One pattern list for failed imports; every match gets the same outcome (remove, blocklist, re-search)</td></tr>
+<tr><td>Per-file reasons</td><td>Reads the rejection on each file, so a row that says “matched by ID” whose file says “not an upgrade” is handled as not-an-upgrade</td><td>See only the queue row's message</td></tr>
+<tr><td>SABnzbd</td><td>Stall watcher built for it: dead posts at the head of the queue, missing-article thresholds, orphan checks across every configured arr</td><td>Cleanuparr's FAQ says native Usenet support will not be added. Decluttarr queries SABnzbd only to measure speed.</td></tr>
+<tr><td>Library and history review</td><td>Chronic-failure list from grab history; report-only suspect-file review, each file reported once</td><td>Not offered</td></tr>
+<tr><td>Digests</td><td>Cadence per category, reminders for items still waiting on you, summary totals</td><td>Per-event notifications on strike and removal</td></tr>
+</tbody></table></div>
+
+<h2 id="others">Where they are ahead</h2>
+<ul>
+<li><strong>Torrents.</strong> Private-tracker handling, protected tags, seeding cleanup, “downloading metadata” and slow-speed strikes. Cleanuparr integrates qBittorrent, Deluge, Transmission, µTorrent and rTorrent; Decluttarr integrates qBittorrent. plungarr has no torrent-client integration; its import handling still works for torrent users because it operates on the arr side.</li>
+<li><strong>More arrs.</strong> Both support Lidarr, Readarr and Whisparr; Cleanuparr adds Sportarr and LazyLibrarian. plungarr supports Sonarr and Radarr.</li>
+<li><strong>Cleanuparr</strong> has a web UI, a community blocklist of known-bad files, missing-content and unmet-cutoff searching, and more notification targets including Notifiarr, Telegram and Pushover.</li>
+<li><strong>Decluttarr</strong> removes orphaned, unmonitored and missing-file downloads and can detect deletions in the media folders.</li>
+</ul>
+
+<h2 id="same">Where all three agree</h2>
+<ul>
+<li>Multiple arr instances in one container.</li>
+<li>A dry-run or test mode.</li>
+<li>Remove, blocklist and search again as the default outcome for a bad download. Their strike counters and plungarr's two-sighting age gate are the same idea.</li>
+</ul>
+
+<h2 id="pick">Which to use</h2>
+<p>Torrent-first, or you want buttons: Cleanuparr. Usenet-first, or your pile is mostly “manual import required” rows that only needed finishing: plungarr. They do not conflict, but do not point two tools at the same queue with overlapping rules.</p>
+</main>
+<footer><div class="row">
+  <span>MIT licence</span>
+  <a href="https://github.com/stove-bison/plungarr">Source</a>
+  <a href="https://github.com/stove-bison/plungarr/issues">Issues</a>
+</div></footer>
+</body>
+</html>

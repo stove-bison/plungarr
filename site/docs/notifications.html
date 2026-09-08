@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notifications · plungarr</title>
+<meta name="description" content="Send plungarr digests to Discord, Slack, ntfy, Gotify, Apprise or a JSON endpoint, with a cadence per category.">
+<link rel="icon" href="../icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="top"><div class="row">
+  <a class="brand" href="../index.html"><img src="../icon.svg" alt="">plungarr</a>
+  <nav>
+    <a href="install.html">Install</a>
+    <a href="settings.html">Settings</a>
+    <a href="notifications.html" aria-current="page">Notifications</a>
+    <a href="compare.html">Compare</a>
+    <a href="faq.html">FAQ</a>
+    <a href="https://github.com/stove-bison/plungarr">GitHub</a>
+  </nav>
+</div></header>
+<main>
+<h1>Notifications</h1>
+<p class="lead">Off unless <code>NOTIFY_URL</code> is set. Everything still goes to the container log. With a URL, plungarr sends digests to one receiver, and each category has its own cadence.</p>
+
+<div class="note"><p><strong>Tested against a live receiver:</strong> ntfy, startup message and immediate digest, September 2026. The other formats follow each service's published API and are covered by unit tests, but have not yet been exercised against a real receiver. If one misbehaves, <a href="https://github.com/stove-bison/plungarr/issues">open an issue</a> with the error line from the log.</p></div>
+
+<h2 id="receivers">Receivers</h2>
+<p>Pick a format with <code>NOTIFY_FORMAT</code>. <code>NOTIFY_TOKEN</code> is optional. <code>NOTIFY_EXTRA_JSON</code> is a JSON object merged into every payload for receiver-specific fields.</p>
+<div class="scroll"><table>
+<thead><tr><th>Format</th><th>URL to set</th><th>Payload and auth</th></tr></thead>
+<tbody>
+<tr><td><code>discord</code></td><td>The channel's webhook URL</td><td><code>{"content"}</code>. Long digests are split at 2000 characters at line boundaries. Extra JSON can set <code>username</code>.</td></tr>
+<tr><td><code>slack</code></td><td>The incoming-webhook URL</td><td><code>{"text"}</code>.</td></tr>
+<tr><td><code>ntfy</code></td><td>The topic URL, e.g. <code>https://ntfy.sh/your-topic</code></td><td>Raw text with a <code>Title</code> header. Token becomes a Bearer header. Extra JSON fields become headers, e.g. <code>{"Priority":"4","Tags":"tv"}</code>.</td></tr>
+<tr><td><code>gotify</code></td><td><code>https://host/message</code></td><td><code>{"title","message","priority"}</code>. Token is sent as <code>X-Gotify-Key</code>. Extra JSON can override <code>priority</code>.</td></tr>
+<tr><td><code>apprise</code></td><td>An Apprise API notify URL with the key in the path</td><td><code>{"title","body","type"}</code>. Token becomes a Bearer header. For the stateless endpoint put <code>urls</code> in extra JSON.</td></tr>
+<tr><td><code>json</code> (default)</td><td>Anything that accepts a POST</td><td><code>{"source":"plungarr","title","text","items":[…]}</code>. Token becomes a Bearer header. For Home Assistant, n8n, or your own script.</td></tr>
+</tbody></table></div>
+
+<h2 id="categories">Categories and cadence</h2>
+<p>Each takes <code>immediate</code>, <code>daily</code>, <code>weekly</code>, <code>monthly</code>, or <code>none</code>.</p>
+<div class="scroll"><table>
+<thead><tr><th>Setting</th><th>Carries</th><th>Default</th></tr></thead>
+<tbody>
+<tr><td><code>NOTIFY_ATTENTION</code></td><td>Items plungarr refuses to touch: unrecognised blocks, sample flags, mapping mismatches, a wedged SABnzbd head</td><td>immediate</td></tr>
+<tr><td><code>NOTIFY_ERRORS</code></td><td>API failures, cycle errors, state-save failures</td><td>immediate</td></tr>
+<tr><td><code>NOTIFY_ACTIONS</code></td><td>Every import, removal, blocklist, replacement search, stalled and doomed deletion</td><td>daily</td></tr>
+<tr><td><code>NOTIFY_PROBLEMS</code></td><td>Chronic failures from the history review</td><td>daily</td></tr>
+<tr><td><code>NOTIFY_CORRUPTION</code></td><td>Suspect library files from the daily review</td><td>weekly</td></tr>
+<tr><td><code>NOTIFY_SUMMARY</code></td><td>“What plungarr did” as totals for the period, no per-item lines</td><td>none</td></tr>
+<tr><td><code>NOTIFY_HEARTBEAT</code></td><td>“plungarr alive” line even when nothing else happened</td><td>none</td></tr>
+</tbody></table></div>
+
+<h2 id="timing">Timing and reminders</h2>
+<ul>
+<li><strong>Immediate</strong> batches within one cycle and sends once at the end of it, so thirty rejections arrive as one message.</li>
+<li><strong>Digests</strong> fire at <code>NOTIFY_DIGEST_HOUR</code> (default 8, container local time), on <code>NOTIFY_DIGEST_DAY</code> (default monday) for weekly and <code>NOTIFY_DIGEST_DAY_OF_MONTH</code> (default 1) for monthly. Categories sharing a slot are merged into one message with a section each. A window that passed while the container was down goes out on the next cycle.</li>
+<li><strong>Reminders.</strong> An attention item or repeating error is sent once when first seen and again only after <code>NOTIFY_REMIND_DAYS</code> (default 7; 0 disables). This is the guard against a pile of items nobody noticed.</li>
+<li><strong>Startup.</strong> One message when the container starts, listing apps, the stall watcher state, and the cadence settings, so a bad URL or token shows up in seconds. The log line <code>NOTIFY-STARTUP</code> confirms it went.</li>
+<li><strong>Delivery failures</strong> log <code>NOTIFY-ERROR</code> and are retried next cycle. They never block queue processing. Every successful delivery logs <code>NOTIFY-SENT</code>.</li>
+<li><strong>Dry run</strong> builds the digest text, logs it, and never posts.</li>
+</ul>
+
+<h2 id="example">What a digest looks like</h2>
+<pre><code>plungarr: 2 need attention, 5 action(s)
+
+## Needs attention (2)
+- [sonarr] Example.Kids.Show.S02E02.720p.WEB — flagged as a sample; left untouched (set SAMPLE_ACTION=replace or discard to auto-clear)
+- [sonarr] Example.Series.S05.720p.BluRay — archive not extracted; left untouched (set ARCHIVE_ACTION=replace or discard to auto-clear)
+
+## Actions taken (5)
+- [sonarr] IMPORTED Example.Show.S02E04.1080p.WEB-DL — 1 file(s) sent to ManualImport
+- [sonarr] REMOVED (discarded, no replacement search) Example.Show.S01E35.1080p.WEB-DL — not an upgrade for the existing file
+…</code></pre>
+<p>Every line names the setting that would let plungarr act on it automatically, so the digest doubles as a configuration hint.</p>
+
+<h2 id="test">Trying it in ten minutes</h2>
+<ol>
+<li>Pick a random topic name and subscribe to it at <code>https://ntfy.sh/that-name</code> in a browser or the ntfy app.</li>
+<li>Set <code>NOTIFY_URL</code> to that URL and <code>NOTIFY_FORMAT</code> to <code>ntfy</code>, restart plungarr.</li>
+<li>Expect “plungarr online” within seconds, then a “Needs attention” message at the end of the first cycle if anything is waiting on you.</li>
+</ol>
+<p>Public ntfy topics can be read by anyone who guesses the name, and digests contain release titles, so switch to your own receiver afterwards.</p>
+</main>
+<footer><div class="row">
+  <span>MIT licence</span>
+  <a href="https://github.com/stove-bison/plungarr">Source</a>
+  <a href="https://github.com/stove-bison/plungarr/issues">Issues</a>
+</div></footer>
+</body>
+</html>
