@@ -11,9 +11,8 @@ manual inspection. What it can't fix safely, it reports and leaves alone.
 
 Single-file Node 22 service, no dependencies. Talks to everything over the
 apps' own HTTP APIs. Any number of Sonarr and Radarr instances can be
-configured in one container, which matters if they share a SABnzbd: the
-stall watcher only treats a download as an orphan when no configured
-instance owns it.
+configured in one container, which matters if they share a SABnzbd: a
+download only counts as an orphan when no configured instance owns it.
 
 ## What it does
 
@@ -28,9 +27,13 @@ instance owns it.
 | **Archive** the download client never extracted ("Found archive file, might need to be extracted") | `ARCHIVE_ACTION`, default **replace** |
 | **Dangerous or executable file** in the download | `DANGEROUS_FILE_ACTION`, default **replace** |
 | File flagged as a **sample** | `SAMPLE_ACTION`, default **notify** (short-form shows trip the sample detector on real episodes) |
+| Sonarr: **file name disagrees with the folder name** ("Episode 7x20 was unexpected considering the ... folder name", usually a parser quirk like `1x8_720.mkv`) | `FOLDER_MISMATCH_ACTION`, default **import**: use Sonarr's own file-to-episode mapping, only when it covers exactly the episodes that were grabbed. Anything else is reported. Also takes `replace`, `discard`, `notify`. |
+| Single-episode file that would replace a library file **spanning more episodes** | Treated as not an upgrade: `NOT_UPGRADE_ACTION` |
+| Completed or failed download **no configured arr grabbed** (series or movie deleted mid-download, NZB added by hand) | `ORPHAN_ACTION`, default **delete**: remove from the queue and the download client, no blocklist, no search. `notify` only reports it. Never fires while another configured instance owns the download. |
 | Anything it doesn't recognize | `NOTIFY` log line, left untouched. Never guess. |
 
-The four `*_ACTION` settings take one of three values:
+The `*_ACTION` settings take one of these values (`FOLDER_MISMATCH_ACTION` adds
+`import`; `ORPHAN_ACTION` takes only `delete` or `notify`):
 
 | Value | Effect |
 |---|---|
@@ -160,7 +163,9 @@ Everything is an environment variable with a sane default — see
 | `ARCHIVE_ACTION` | replace | Unextracted archive: `replace`, `discard`, or `notify` |
 | `DANGEROUS_FILE_ACTION` | replace | Dangerous or executable file: `replace`, `discard`, or `notify` |
 | `SAMPLE_ACTION` | notify | File flagged as a sample: `replace`, `discard`, or `notify` |
-| `NOT_UPGRADE_ACTION` | discard | Not an upgrade for the existing file: `replace`, `discard`, or `notify` |
+| `NOT_UPGRADE_ACTION` | discard | Not an upgrade for the existing file, or would replace a multi-episode file: `replace`, `discard`, or `notify` |
+| `FOLDER_MISMATCH_ACTION` | import | Sonarr file name disagrees with the folder name: `import`, `replace`, `discard`, or `notify` |
+| `ORPHAN_ACTION` | delete | Completed or failed download no configured arr grabbed: `delete` or `notify` |
 | `NOTIFY_URL` | — | Webhook receiver; empty keeps log-only behaviour |
 | `NOTIFY_FORMAT` | json | `discord`, `slack`, `ntfy`, `gotify`, `apprise`, or `json` |
 | `NOTIFY_TOKEN` | — | Optional auth token for ntfy, gotify, apprise, json |

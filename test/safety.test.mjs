@@ -134,7 +134,7 @@ test('F6: dry-run queue actions cannot suppress subsequent live actions', async 
   const h = harness({ DRY_RUN: 'true' }), st = state();
   const fallback = h.fixture.api;
   h.fixture.api = (app, method, url, body) => method === 'GET' && url.startsWith('/queue')
-    ? { totalRecords: 1, records: [{ id: 1, downloadId: 'job-a', title: 'Example.Release', status: 'completed',
+    ? { totalRecords: 1, records: [{ id: 1, downloadId: 'job-a', title: 'Example.Release', status: 'completed', seriesId: 1,
       trackedDownloadState: 'importBlocked', statusMessages: [{ messages: ['No files found are eligible for import'] }] }] }
     : fallback(app, method, url, body);
   await h.processApp(sonarr, st);
@@ -728,6 +728,158 @@ test('N17: a state file from the pre-v2 notifier has its seen list cleared once,
   assert.ok(h.logs.some(l => l.includes('NOTIFY-SENT') && l.includes('attention')));
   await h.processApp(sonarr, st); await h.notifyFlush(st);
   assert.equal(h.posts.length, 1, 'v2 seen list is kept after migration');
+});
+
+// ---------- orphans: downloads no configured arr grabbed ----------
+const orphan = (id, extra = {}) => blocked(id, ["Download wasn't grabbed by sonarr, skipping"],
+  { seriesId: undefined, trackedDownloadState: 'importPending', ...extra });
+
+test('O1: a completed download no arr grabbed is deleted after the age gate without blocklist or search', async () => {
+  const h = harness(), st = state(); queued(h, [orphan(1)]);
+  await h.processApp(sonarr, st); assert.equal(deletes(h).length, 0);
+  h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /removeFromClient=true&blocklist=false&skipRedownload=true/);
+  assert.ok(h.logs.some(l => l.includes('REMOVED (ORPHAN')));
+});
+
+test('O2: a failed download no arr grabbed is deleted the same way', async () => {
+  const h = harness(), st = state(); queued(h, [orphan(1, { status: 'failed', trackedDownloadState: 'downloading' })]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /blocklist=false&skipRedownload=true/);
+});
+
+test('O3: an unknown download that is still downloading is left alone', async () => {
+  const h = harness(), st = state(); queued(h, [orphan(1, { status: 'downloading', trackedDownloadState: 'downloading' })]);
+  await h.processApp(sonarr, st); h.advance(60); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 0);
+});
+
+test('O4: ORPHAN_ACTION=notify leaves the item and names the setting', async () => {
+  const h = harness({ ORPHAN_ACTION: 'notify' }), st = state(); queued(h, [orphan(1)]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('ORPHAN_ACTION')));
+});
+
+test('O5: a download another configured instance owns is never treated as an orphan', async () => {
+  const h = harness({ RADARR_URL: 'http://radarr.invalid', RADARR_API_KEY: 'k' }), st = state();
+  const [main, movies] = h.CONFIG.apps;
+  h.fixture.api = async (app, method, url, body) => {
+    h.calls.push({ app: app.name, method, url, body });
+    if (method !== 'GET') return {};
+    if (url.startsWith('/queue')) {
+      const rec = app === main ? orphan(1) : { ...orphan(1), movieId: 7, statusMessages: [] };
+      return { page: 1, totalRecords: 1, records: [rec] };
+    }
+    throw new Error('Unexpected mock read: ' + url);
+  };
+  await h.processApp(main, st); h.advance(6); await h.processApp(main, st);
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.calls.some(c => c.app === movies.name && c.url.startsWith('/queue')), 'ownership was checked against the other instance');
+});
+
+test('O6: an unavailable sibling instance blocks orphan deletion', async () => {
+  const h = harness({ RADARR_URL: 'http://radarr.invalid', RADARR_API_KEY: 'k' }), st = state();
+  const [main] = h.CONFIG.apps;
+  h.fixture.api = async (app, method, url, body) => {
+    h.calls.push({ app: app.name, method, url, body });
+    if (app !== main) throw new Error('connection refused');
+    if (method !== 'GET') return {};
+    if (url.startsWith('/queue')) return { page: 1, totalRecords: 1, records: [orphan(1)] };
+    throw new Error('Unexpected mock read: ' + url);
+  };
+  await h.processApp(main, st); h.advance(6); await h.processApp(main, st);
+  assert.equal(deletes(h).length, 0);
+});
+
+test('O7: invalid ORPHAN_ACTION fails startup with the setting name', () => {
+  assert.throws(() => harness({ ORPHAN_ACTION: 'replace' }), /ORPHAN_ACTION/);
+});
+
+// ---------- folder-name mismatch: file episodes disagree with the release folder ----------
+const UNEXPECTED = 'Episode 7x20 was unexpected considering the Release.1 folder name';
+const pending = (id, messages, extra = {}) => blocked(id, messages, { trackedDownloadState: 'importPending', episodeId: 41, ...extra });
+
+test('U1: a mismatch whose candidate maps exactly the grabbed episode is imported with the candidate mapping', async () => {
+  const h = harness(), st = state();
+  h.candidates = [{ path: '/x/1x8_720.mkv', series: { id: 1 }, episodes: [{ id: 41 }], quality: { q: 1 },
+    rejections: [{ reason: UNEXPECTED }] }];
+  queued(h, [pending(1, [UNEXPECTED])]);
+  await h.processApp(sonarr, st); assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+  h.advance(6); await h.processApp(sonarr, st);
+  const cmd = h.calls.find(c => c.url === '/command');
+  assert.ok(cmd, 'ManualImport command sent');
+  assert.equal(JSON.stringify(cmd.body.files.map(f => f.episodeIds)), '[[41]]');
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.logs.some(l => l.includes('IMPORTED')));
+});
+
+test('U2: a candidate mapping that does not cover the grabbed episodes is left for a human', async () => {
+  const h = harness(), st = state();
+  h.candidates = [{ path: '/x/E22-23.mkv', series: { id: 1 }, episodes: [{ id: 41 }],
+    rejections: [{ reason: 'Episodes 1x22, 1x23 were unexpected considering the Release.1 folder name' }] }];
+  queued(h, [pending(1, [UNEXPECTED]), pending(2, [UNEXPECTED], { downloadId: 'dl-1', episodeId: 42 })]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('folder')));
+});
+
+test('U3: a candidate mapped to an episode outside the grab is never imported', async () => {
+  const h = harness(), st = state();
+  h.candidates = [{ path: '/x/a.mkv', series: { id: 1 }, episodes: [{ id: 99 }], rejections: [{ reason: UNEXPECTED }] }];
+  queued(h, [pending(1, [UNEXPECTED])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+  assert.equal(deletes(h).length, 0);
+});
+
+test('U4: FOLDER_MISMATCH_ACTION=replace removes, blocklists and searches again', async () => {
+  const h = harness({ FOLDER_MISMATCH_ACTION: 'replace' }), st = state();
+  queued(h, [pending(1, [UNEXPECTED])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /blocklist=true&skipRedownload=false/);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+});
+
+test('U5: FOLDER_MISMATCH_ACTION=notify leaves the item and names the setting', async () => {
+  const h = harness({ FOLDER_MISMATCH_ACTION: 'notify' }), st = state();
+  queued(h, [pending(1, [UNEXPECTED])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 0);
+  assert.equal(h.calls.filter(c => c.url.startsWith('/manualimport')).length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('FOLDER_MISMATCH_ACTION')));
+});
+
+test('U6: dry run reports the intended import and sends no command', async () => {
+  const h = harness({ DRY_RUN: 'true' }), st = state();
+  h.candidates = [{ path: '/x/1x8_720.mkv', series: { id: 1 }, episodes: [{ id: 41 }], rejections: [{ reason: UNEXPECTED }] }];
+  queued(h, [pending(1, [UNEXPECTED])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.method !== 'GET').length, 0);
+  assert.ok(h.logs.some(l => l.includes('DRY-RUN import')));
+});
+
+// ---------- existing library file covers more episodes ----------
+const MORE_EPISODES = 'Episode file on disk contains more episodes than this file contains';
+
+test('E1: a single-episode download that would replace a multi-episode file is discarded', async () => {
+  const h = harness(), st = state(); queued(h, [pending(1, [MORE_EPISODES])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /blocklist=true&skipRedownload=true/);
+});
+
+test('E2: the same rejection on an import candidate routes through NOT_UPGRADE_ACTION', async () => {
+  const h = harness({ NOT_UPGRADE_ACTION: 'notify' }), st = state();
+  h.candidates = [{ path: '/x.mkv', series: { id: 1 }, episodes: [{ id: 9 }], rejections: [{ reason: MORE_EPISODES }] }];
+  queued(h, [blocked(1, ['matched to series by ID'])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('NOT_UPGRADE_ACTION')));
 });
 
 // ---------- multiple arr instances ----------

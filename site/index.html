@@ -50,6 +50,9 @@
 <tr><td>Archive the download client never extracted</td><td><code>ARCHIVE_ACTION</code>, default <strong>replace</strong>: remove, blocklist, search for a different release</td></tr>
 <tr><td>Dangerous or executable file in the download</td><td><code>DANGEROUS_FILE_ACTION</code>, default <strong>replace</strong></td></tr>
 <tr><td>File flagged as a sample</td><td><code>SAMPLE_ACTION</code>, default <strong>notify</strong>, because short-form shows trip the sample detector on real episodes</td></tr>
+<tr><td>Sonarr: the episode number in the file name disagrees with the release folder name, usually a parser quirk like <code>1x8_720.mkv</code></td><td><code>FOLDER_MISMATCH_ACTION</code>, default <strong>import</strong>: uses Sonarr's own file-to-episode mapping, only when it covers exactly the episodes that were grabbed. Anything else is reported.</td></tr>
+<tr><td>Single-episode file that would replace a library file spanning more episodes</td><td>Treated as not an upgrade, so <code>NOT_UPGRADE_ACTION</code> applies</td></tr>
+<tr><td>Completed or failed download that no configured arr grabbed: a series or movie deleted while it was downloading, or an NZB added by hand</td><td><code>ORPHAN_ACTION</code>, default <strong>delete</strong>: removed from the queue and the download client, no blocklist, no search. Never while another configured instance owns it.</td></tr>
 <tr><td>“No files found are eligible for import”, or a season pack that is one video file</td><td>Remove, blocklist, search for a replacement</td></tr>
 <tr><td>Dead usenet post at the head of the SABnzbd queue: under 5 MB of progress in 45 minutes, or most articles missing</td><td>Remove through the arr that grabbed it, blocklist, search again. One per cycle, so live downloads keep going.</td></tr>
 <tr><td>Anything else</td><td>Logged, sent to your notifications if configured, and left alone. It never guesses.</td></tr>

@@ -45,6 +45,44 @@
   digest text and never POSTs. A startup message validates the receiver.
 - Invalid notification settings stop startup naming the setting.
 
+# Orphaned downloads
+
+- A completed or failed download that no configured Sonarr/Radarr grabbed
+  is now handled. This happens when a series or movie is deleted while its
+  episodes are still downloading, or when an NZB is added to the client by
+  hand: the arr lists it as an unknown item, nothing will ever import it,
+  and it sits in the queue and on disk indefinitely.
+- `ORPHAN_ACTION` (default `delete`) removes it from the arr queue and the
+  download client, with no blocklist and no search. `notify` only reports
+  it. Set `notify` if you add NZBs by hand and import them yourself.
+- Orphans wait for the normal age gate, and are never touched while another
+  configured instance owns the same download, using the same paginated and
+  unpaginated ownership checks as the stall watcher. If a sibling instance
+  cannot be read, the orphan is left alone that cycle.
+- Log line: `REMOVED (ORPHAN, no configured arr grabbed it)`, counted as
+  `orphaned` in digests.
+- Sonarr and Radarr only read the most recent 60 entries of the download
+  client's history. A large backlog of orphans hides older ones; plungarr
+  clears them a batch at a time as the arr exposes them.
+
+# Folder-name mismatches (Sonarr)
+
+- Sonarr refuses to import a file whose parsed episode numbers disagree with
+  the release folder name ("Episode 7x20 was unexpected considering the ...
+  folder name"). In practice this is usually a parser quirk, such as
+  `1x8_720.mkv` reading as episode 7x20, and Sonarr's manual-import view
+  still maps the file to the right episode.
+- `FOLDER_MISMATCH_ACTION` (default `import`) imports with Sonarr's own
+  mapping, but only when every file maps to episodes the download was
+  grabbed for and together they cover exactly those episodes. A file that
+  maps outside the grab, or a set that does not cover it, is reported and
+  left for a human. `replace`, `discard`, and `notify` behave as for the
+  other block actions.
+- A single-episode download that would replace a library file spanning more
+  episodes ("Episode file on disk contains more episodes than this file
+  contains") is now treated as not an upgrade, so `NOT_UPGRADE_ACTION`
+  applies. Importing it would delete the other episodes' only copy.
+
 # Configurable block actions
 
 - Four new settings decide what plungarr does with blocks it recognises but
@@ -87,8 +125,15 @@ The corruption sweep no longer deletes library files or searches for replacement
 Remove obsolete corruption deletion/loop/age/pinned-series settings from your
 configuration; the supported settings are documented in `.env.example`.
 
+Two new settings default to acting: `ORPHAN_ACTION=delete` removes completed
+or failed downloads that no configured arr grabbed, and
+`FOLDER_MISMATCH_ACTION=import` imports Sonarr folder-name mismatches with
+Sonarr's own mapping. Set either to `notify` to keep the previous behaviour
+of reporting only.
+
 Configure every arr instance that shares the configured SAB instance before
-enabling the stall watcher. Missing-article thresholds remain configurable
+enabling the stall watcher or leaving `ORPHAN_ACTION=delete` on: a download
+one instance does not know about may belong to another. Missing-article thresholds remain configurable
 heuristics. Use `DRY_RUN=true` to inspect intended queue actions first.
 
 ## Validation

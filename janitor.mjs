@@ -67,7 +67,7 @@ function choiceEnv(key, fallback, values) {
   return value;
 }
 const ACTION_VALUES = ['replace', 'discard', 'notify'];
-const actionEnv = (key, fallback) => choiceEnv(key, fallback, ACTION_VALUES);
+const actionEnv = (key, fallback, values = ACTION_VALUES) => choiceEnv(key, fallback, values);
 const CADENCE_VALUES = ['immediate', 'daily', 'weekly', 'monthly', 'none'];
 const cadenceEnv = (key, fallback) => choiceEnv(key, fallback, CADENCE_VALUES);
 const NOTIFY_FORMATS = ['discord', 'slack', 'ntfy', 'gotify', 'apprise', 'json'];
@@ -129,6 +129,12 @@ const CONFIG = {
     dangerous: actionEnv('DANGEROUS_FILE_ACTION', 'replace'),
     sample: actionEnv('SAMPLE_ACTION', 'notify'),
     not_upgrade: actionEnv('NOT_UPGRADE_ACTION', 'discard'),
+    //   import  = (folder mismatch only) import with the arr's own file-to-episode
+    //             mapping, but only when it covers exactly the grabbed episodes
+    folder_mismatch: actionEnv('FOLDER_MISMATCH_ACTION', 'import', ['import', 'replace', 'discard', 'notify']),
+    //   delete  = (orphans only) remove from the arr queue and the download
+    //             client, no blocklist, no search: nothing would import it
+    orphan: actionEnv('ORPHAN_ACTION', 'delete', ['delete', 'notify']),
   },
   sab: {
     url: env('SABNZBD_URL', '').replace(/\/$/, ''),
@@ -195,7 +201,15 @@ const IGNORABLE = [
 ];
 const RX_EMPTY = /No files found are eligible for import/i;
 const RX_SEASON_BUNDLE = /Single episode file contains all episodes/i;
-const RX_NOT_UPGRADE = /do not improve on Existing|Not an? (Custom Format )?upgrade for existing/i;
+// A single-episode file that would replace a library file spanning more
+// episodes (SameEpisodesImportSpecification) is treated as not an upgrade:
+// importing it would delete the other episodes' only copy.
+const RX_NOT_UPGRADE = /do not improve on Existing|Not an? (Custom Format )?upgrade for existing|Episode file on disk contains more episodes than this file contains/i;
+// Sonarr's MatchesFolderSpecification: the episode numbers parsed from the
+// file name disagree with the release folder name (e.g. "1x8_720.mkv" reads
+// as episode 7x20). The manual-import candidate still carries the arr's own
+// file-to-episode mapping, which FOLDER_MISMATCH_ACTION=import relies on.
+const RX_FOLDER_MISMATCH = /unexpected considering the .+ folder name/i;
 // Message texts below are identical in Sonarr and Radarr (DownloadedEpisodesImportService /
 // DownloadedMovieImportService and the NotSampleSpecification in each).
 const RX_ARCHIVE = /Found archive file, might need to be extracted/i;
@@ -204,11 +218,16 @@ const RX_SAMPLE = /^\s*Sample\s*$/i; // exact; "Unable to determine if file is a
 const ACTION_SETTING = {
   archive: 'ARCHIVE_ACTION', dangerous: 'DANGEROUS_FILE_ACTION',
   sample: 'SAMPLE_ACTION', not_upgrade: 'NOT_UPGRADE_ACTION',
+  folder_mismatch: 'FOLDER_MISMATCH_ACTION', orphan: 'ORPHAN_ACTION',
 };
 const ACTION_REASON = {
   archive: 'archive not extracted', dangerous: 'dangerous or executable file',
   sample: 'flagged as a sample', not_upgrade: 'not an upgrade for the existing file',
+  folder_mismatch: 'file episodes disagree with the release folder name',
+  orphan: 'no configured arr grabbed this download',
 };
+// Values a NOTIFY line suggests for auto-clearing each class.
+const ACTION_AUTO = { folder_mismatch: 'import, replace or discard', orphan: 'delete' };
 
 const log = (app, action, title, detail = '') => {
   console.log(`${new Date().toISOString()} | ${app} | ${action} | ${title}${detail ? ' | ' + detail : ''}`);
@@ -258,6 +277,12 @@ async function api(app, method, p, body) {
 // ---------- classification ----------
 function classify(rec) {
   const state = rec.trackedDownloadState;
+  // No series/movie id means the arr found this in the client's history but
+  // has no grab for it (a series deleted mid-download, a hand-added NZB).
+  // Nothing will ever import it, so it is an orphan once the client is done.
+  if (!rec.seriesId && !rec.movieId) {
+    return rec.status === 'completed' || rec.status === 'failed' ? 'orphan' : null;
+  }
   if (rec.status !== 'completed' || !/^import(Blocked|Pending|Failed)$/.test(state || '')) return null;
   // An entry's title is usually just the release name — only treat it as the
   // problem text when the entry has no messages. Including release names in
@@ -272,6 +297,7 @@ function classify(rec) {
   if (msgs.some(m => RX_ARCHIVE.test(m))) return 'archive';
   if (msgs.some(m => RX_NOT_UPGRADE.test(m))) return 'not_upgrade';
   if (msgs.some(m => RX_SAMPLE.test(m))) return 'sample';
+  if (msgs.some(m => RX_FOLDER_MISMATCH.test(m))) return 'folder_mismatch';
   if (msgs.every(m => IGNORABLE.some(rx => rx.test(m)))) return 'verified_import';
   return 'unknown';
 }
@@ -284,7 +310,10 @@ async function removeItems(app, recs, { blocklist, research }) {
     `/queue/bulk?removeFromClient=true&blocklist=${blocklist}&skipRedownload=${!research}`, { ids });
 }
 
-async function verifiedImport(app, rec) {
+// Episode ids the arr grabbed this download for (v3 episodeId, v5 episodeIds).
+const grabbedEpisodeIds = group => new Set(group.flatMap(r => r.episodeIds || (r.episodeId ? [r.episodeId] : [])));
+
+async function verifiedImport(app, rec, group = [rec]) {
   const cands = await api(app, 'GET', `/manualimport?downloadId=${rec.downloadId}&filterExistingFiles=true`);
   if (!Array.isArray(cands) || !cands.length) {
     log(app.name, 'NOTIFY', rec.title, 'no manual-import candidates despite importable classification');
@@ -295,13 +324,29 @@ async function verifiedImport(app, rec) {
   // the whole download is handed back to processApp() as that class so the
   // configured *_ACTION applies. Any other rejection is a human's call.
   const files = [], skipped = new Set();
+  // Folder-name mismatches are importable only with the arr's own mapping,
+  // and only when every mapped episode is one the download was grabbed for.
+  const grabbed = grabbedEpisodeIds(group), mapped = new Set();
+  let mismatched = false;
   for (const c of cands) {
     const rej = (c.rejections || []).map(x => x.reason || x)
       .filter(x => !IGNORABLE.some(rx => rx.test(x)));
     if (rej.length) {
       if (rej.every(r => RX_NOT_UPGRADE.test(r))) { skipped.add('not_upgrade'); continue; }
       if (rej.every(r => RX_SAMPLE.test(r))) { skipped.add('sample'); continue; }
-      log(app.name, 'NOTIFY', c.relativePath || rec.title, 'unexpected rejection: ' + rej.join('; ')); return false;
+      if (rej.every(r => RX_FOLDER_MISMATCH.test(r))) {
+        if (CONFIG.actions.folder_mismatch !== 'import') { skipped.add('folder_mismatch'); continue; }
+        const ids = (c.episodes || []).map(e => e.id);
+        if (app.kind !== 'series' || !ids.length || !ids.every(id => grabbed.has(id))) {
+          log(app.name, 'NOTIFY', c.relativePath || rec.title,
+            `folder-name mismatch and the file maps to episodes outside the grab (${ids.join(',') || 'none'}); left for a human`);
+          return false;
+        }
+        ids.forEach(id => mapped.add(id));
+        mismatched = true;
+      } else {
+        log(app.name, 'NOTIFY', c.relativePath || rec.title, 'unexpected rejection: ' + rej.join('; ')); return false;
+      }
     }
     if (app.kind === 'series') {
       if (!c.series || c.series.id !== rec.seriesId || !(c.episodes || []).length) {
@@ -334,6 +379,11 @@ async function verifiedImport(app, rec) {
     log(app.name, 'NOTIFY', rec.title, 'candidates rejected for mixed reasons: ' + [...skipped].join(', '));
     return false;
   }
+  if (mismatched && (grabbed.size !== mapped.size || [...grabbed].some(id => !mapped.has(id)))) {
+    log(app.name, 'NOTIFY', rec.title,
+      `folder-name mismatch and the files cover episodes ${[...mapped].join(',')} but the grab was for ${[...grabbed].join(',')}; left for a human`);
+    return false;
+  }
   if (CONFIG.dryRun) return log(app.name, 'DRY-RUN import', rec.title, `${files.length} file(s)`), true;
   await api(app, 'POST', '/command', { name: 'ManualImport', files, importMode: 'auto' });
   log(app.name, 'IMPORTED', rec.title, `${files.length} file(s) sent to ManualImport`);
@@ -348,7 +398,22 @@ async function applyAction(app, st, gateKey, group, rec, action, cls) {
   const dry = CONFIG.dryRun ? 'DRY-RUN ' : '';
   if (action === 'notify') {
     log(app.name, 'NOTIFY', rec.title, `${reason}; left untouched` +
-      (setting ? ` (set ${setting}=replace or discard to auto-clear)` : ''));
+      (setting ? ` (set ${setting}=${ACTION_AUTO[cls] || 'replace or discard'} to auto-clear)` : ''));
+    return;
+  }
+  if (action === 'delete') {
+    // Only for downloads no configured instance owns. Another instance sharing
+    // the client's category sees the same history entry, so confirm first.
+    for (const other of CONFIG.apps) {
+      if (other === app) continue;
+      if ((await trackedGroup(other, rec.downloadId)).some(r => r.seriesId || r.movieId)) {
+        log(app.name, 'NOTIFY', rec.title, `${reason} here, but ${other.name} owns it; left untouched`);
+        return;
+      }
+    }
+    await removeItems(app, group, { blocklist: false, research: false });
+    if (!CONFIG.dryRun) st.actioned[gateKey] = Date.now();
+    log(app.name, dry + 'REMOVED (ORPHAN, no configured arr grabbed it)', rec.title, 'deleted from the download client too');
     return;
   }
   if (action === 'replace') {
@@ -421,8 +486,8 @@ async function processApp(app, st) {
 
     try {
       let effective = cls;
-      if (cls === 'verified_import') {
-        const result = await verifiedImport(app, rec);
+      if (cls === 'verified_import' || (cls === 'folder_mismatch' && CONFIG.actions.folder_mismatch === 'import')) {
+        const result = await verifiedImport(app, rec, group);
         if (result === true) { if (!CONFIG.dryRun) st.actioned[gateKey] = now; continue; }
         if (result === false) continue;
         effective = result; // every remaining candidate was rejected for one policy reason
@@ -569,19 +634,23 @@ async function sabApi(params) {
 
 // Remove a SAB download through whichever arr tracks it (blocklist + re-search
 // with the usual loop guard); an untracked download is deleted in SAB directly.
+// Queue records of `app` for one download id. A constant total cannot detect
+// every change between pages, so an empty paginated result is confirmed
+// against the arr's unpaginated endpoint before it counts as "not tracked".
+async function trackedGroup(app, downloadId) {
+  const matches = r => (r.downloadId || '').toLowerCase() === String(downloadId || '').toLowerCase();
+  const group = (await arrQueue(app)).filter(matches);
+  if (group.length) return group;
+  const details = await api(app, 'GET', '/queue/details');
+  if (!Array.isArray(details) || details.some(r => !r || !Number.isSafeInteger(r.id))) {
+    throw new Error('Invalid ownership confirmation; no removal attempted');
+  }
+  return details.filter(matches);
+}
+
 async function stallRemove(st, nzoId, slotName, why, confirm = async () => true) {
   for (const app of CONFIG.apps) {
-    const matches = r => (r.downloadId || '').toLowerCase() === nzoId.toLowerCase();
-    let group = (await arrQueue(app)).filter(matches);
-    if (!group.length) {
-      // A constant total cannot detect every change between pages. Before
-      // declaring an orphan, confirm against the arr's unpaginated endpoint.
-      const details = await api(app, 'GET', '/queue/details');
-      if (!Array.isArray(details) || details.some(r => !r || !Number.isSafeInteger(r.id))) {
-        throw new Error('Invalid ownership confirmation; no removal attempted');
-      }
-      group = details.filter(matches);
-    }
+    const group = await trackedGroup(app, nzoId);
     if (!group.length) continue;
     const key = normTitle(group[0].title);
     const n = st.blocklistCount[key] || 0;
