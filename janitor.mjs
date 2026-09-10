@@ -170,6 +170,14 @@ const CONFIG = {
       heartbeat: cadenceEnv('NOTIFY_HEARTBEAT', 'none'),
     },
   },
+  // Leftover job folders in the download client's completed directory. Off
+  // unless LEFTOVER_DIRS names the container paths whose children are jobs.
+  leftover: {
+    dirs: env('LEFTOVER_DIRS', '').split(',').map(s => s.trim()).filter(Boolean),
+    minAgeHours: numberEnv('LEFTOVER_MIN_AGE_HOURS', 24),
+    everyHours: numberEnv('LEFTOVER_HOURS', 6, Number.MIN_VALUE),
+    action: choiceEnv('LEFTOVER_ACTION', 'notify', ['notify', 'delete']),
+  },
   corrupt: {
     enabled: boolEnv('CORRUPT_SWEEP_ENABLED', true),
     sweepHours: numberEnv('CORRUPT_SWEEP_HOURS', 24, Number.MIN_VALUE),
@@ -183,6 +191,9 @@ const CONFIG = {
       ['unreadable', 'stub', 'junk_readable', 'tiny_readable', 'scanner_blind']),
   },
 };
+for (const d of CONFIG.leftover.dirs) {
+  if (!/^([A-Za-z]:)?[\\/]/.test(d)) throw new Error(`Invalid LEFTOVER_DIRS: "${d}" is not an absolute path`);
+}
 {
   const names = CONFIG.apps.map(a => a.name);
   const dup = names.find((n, i) => names.indexOf(n) !== i);
@@ -648,6 +659,120 @@ async function corruptSweepInner(st) {
   }
 }
 
+// ---------- leftover download folders ----------
+// SAB never deletes anything in its completed directory (by design), and an
+// arr only cleans up jobs it grabbed. A job folder nobody references any
+// more (series deleted, hand-added NZB, failed orphan) sits there for good.
+// The folder name is the join key: it is the last path segment of the arr's
+// outputPath and of SAB's storage path, so path mappings do not matter.
+const jobName = p => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase();
+const fmtSize = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB';
+
+async function sabHistory() {
+  const slots = [], seen = new Set();
+  let total;
+  for (let start = 0; start < 200000; start += 200) {
+    const h = (await sabApi({ mode: 'history', start, limit: 200 }))?.history;
+    if (!h || !Array.isArray(h.slots)) throw new Error('Invalid SAB history');
+    const count = h.noofslots;
+    if (!Number.isSafeInteger(count) || count < 0 || (total !== undefined && count !== total)) throw new Error('Incomplete or changing SAB history');
+    total = count;
+    for (const slot of h.slots) {
+      if (typeof slot.nzo_id !== 'string' || !slot.nzo_id || seen.has(slot.nzo_id)) throw new Error('Invalid or duplicate SAB history slot');
+      seen.add(slot.nzo_id);
+      slots.push(slot);
+    }
+    if (slots.length === total) return slots;
+    if (h.slots.length !== 200 || slots.length > total) throw new Error('Incomplete SAB history');
+  }
+  throw new Error('SAB history pagination limit reached');
+}
+
+// Every job name some configured arr or SAB still references. Any failed
+// read throws: a partial view must never make a folder look unowned.
+async function referencedJobs() {
+  const names = new Set();
+  const add = v => { const n = jobName(v); if (n) names.add(n); };
+  for (const app of CONFIG.apps) for (const r of await arrQueue(app)) { add(r.outputPath); add(r.title); }
+  if (CONFIG.sab.url && CONFIG.sab.key) {
+    const q = await sabQueue();
+    if (q.paused || q.paused_all) throw new Error('SAB queue is paused; its jobs cannot be listed');
+    for (const slot of q.slots) add(slot.filename);
+    for (const slot of await sabHistory()) { add(slot.storage); add(slot.name); }
+  }
+  return names;
+}
+
+function folderInfo(dir, depth = 0) {
+  let files = 0, bytes = 0, newest = 0;
+  try { newest = fs.lstatSync(dir).mtimeMs || 0; } catch { /* unreadable: treated as old */ }
+  if (depth > 8) return { files, bytes, newest };
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { /* unreadable subfolder */ }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isSymbolicLink()) continue;
+    if (e.isDirectory()) {
+      const sub = folderInfo(full, depth + 1);
+      files += sub.files; bytes += sub.bytes; newest = Math.max(newest, sub.newest);
+    } else if (e.isFile()) {
+      try { const st = fs.lstatSync(full); files++; bytes += st.size || 0; newest = Math.max(newest, st.mtimeMs || 0); } catch { /* vanished */ }
+    }
+  }
+  return { files, bytes, newest };
+}
+
+let leftoverRunning = false;
+async function leftoverSweep(st) {
+  if (!CONFIG.leftover.dirs.length || leftoverRunning) return;
+  const stamp = CONFIG.dryRun ? 'lastDryLeftoverSweep' : 'lastLeftoverSweep';
+  if (Date.now() < (st[stamp] || 0) + CONFIG.leftover.everyHours * 3600_000) return;
+  leftoverRunning = true;
+  try {
+    st[stamp] = Date.now();
+    saveState(st);
+    await leftoverSweepInner(st);
+  } finally { leftoverRunning = false; }
+}
+async function leftoverSweepInner() {
+  const referenced = await referencedJobs();
+  const now = Date.now(), minAge = CONFIG.leftover.minAgeHours * 3600_000;
+  let checked = 0, reported = 0, deleted = 0;
+  for (const dir of CONFIG.leftover.dirs) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (e) { logError('leftover', 'LEFTOVER-ERROR', `${dir}: ${e.message}`); continue; }
+    for (const ent of entries) {
+      // Only real directories that are direct children of a configured folder
+      // are ever considered, and never through a symlink.
+      if (ent.isSymbolicLink() || !ent.isDirectory()) continue;
+      checked++;
+      if (referenced.has(ent.name.toLowerCase())) continue;
+      const full = path.join(dir, ent.name);
+      const info = folderInfo(full);
+      if (now - info.newest < minAge) continue;
+      const desc = (info.files ? `${info.files} file(s), ${fmtSize(info.bytes)}` : 'empty') +
+        `, last change ${new Date(info.newest).toISOString().slice(0, 10)}; no arr queue item or SAB job references it`;
+      if (CONFIG.leftover.action !== 'delete') {
+        reported++;
+        log('leftover', 'LEFTOVER', ent.name, desc + ' (set LEFTOVER_ACTION=delete to auto-clear)');
+        continue;
+      }
+      if (CONFIG.dryRun) { log('leftover', 'DRY-RUN delete leftover', ent.name, desc); continue; }
+      try {
+        if (fs.lstatSync(full).isSymbolicLink()) continue;
+        fs.rmSync(full, { recursive: true });
+        deleted++;
+        log('leftover', 'LEFTOVER-DELETED', ent.name, desc);
+      } catch (e) {
+        logError('leftover', 'LEFTOVER-ERROR', `${ent.name}: ${e.message}`);
+      }
+    }
+  }
+  log('leftover', 'LEFTOVER-SWEEP-DONE', `${checked} folder(s) checked`,
+    `${reported} leftover(s) reported, ${deleted} deleted`);
+}
+
 // ---------- stall watcher (SABnzbd) ----------
 async function sabApi(params) {
   const qs = new URLSearchParams({ output: 'json', apikey: CONFIG.sab.key, ...params });
@@ -916,7 +1041,7 @@ const notifyBuffer = [];
 
 function categoryOf(action) {
   if (action.startsWith('DRY-RUN')) return null;
-  if (action === 'NOTIFY' || action === 'STALL-NOTIFY') return 'attention';
+  if (action === 'NOTIFY' || action === 'STALL-NOTIFY' || action === 'LEFTOVER') return 'attention';
   if (/ERROR$/.test(action)) return 'errors';
   if (action === 'PROBLEM') return 'problems';
   if (action === 'CORRUPT-NOTIFY') return 'corruption';
@@ -927,6 +1052,7 @@ function categoryOf(action) {
 function counterOf(action) {
   if (action === 'IMPORTED') return 'imported';
   if (action.includes('ORPHAN')) return 'orphaned';
+  if (action === 'LEFTOVER-DELETED') return 'leftovers';
   if (action.startsWith('STALLED-')) return 'stalled';
   if (action.startsWith('DOOMED-')) return 'doomed';
   if (action.includes('loop guard')) return 'loopGuard';
@@ -1073,7 +1199,7 @@ async function notifyFlush(st) {
       const since = n.lastDigest[cadence] || n.counters.since || now;
       sections.push(`## ${CATEGORY_LABEL[cat]} (since ${new Date(since).toISOString().slice(0, 16).replace('T', ' ')})\n` +
         `imported: ${c.imported || 0}, replaced: ${c.replaced || 0}, discarded: ${c.discarded || 0}, ` +
-        `stalled removed: ${c.stalled || 0}, doomed removed: ${c.doomed || 0}, orphans deleted: ${c.orphaned || 0}, ` +
+        `stalled removed: ${c.stalled || 0}, doomed removed: ${c.doomed || 0}, orphans deleted: ${c.orphaned || 0}, leftover folders deleted: ${c.leftovers || 0}, ` +
         `loop-guard stops: ${c.loopGuard || 0}, attention items opened: ${c.attentionOpened || 0}, ` +
         `still open: ${n.openAttention || 0}, errors: ${c.errors || 0}`);
       summarySent = true;
@@ -1143,6 +1269,7 @@ async function cycleInner() {
   const reviews = [
     corruptSweep(state).catch(e => logError('corrupt-sweep', 'CYCLE-ERROR', e.message)).finally(() => saveState(state)),
     failReview(state).catch(e => logError('fail-review', 'CYCLE-ERROR', e.message)).finally(() => saveState(state)),
+    leftoverSweep(state).catch(e => logError('leftover', 'CYCLE-ERROR', e.message)).finally(() => saveState(state)),
   ];
   if (CONFIG.runOnce) await Promise.all(reviews);
   try { await notifyFlush(state); }
@@ -1154,7 +1281,7 @@ if (!CONFIG.apps.length) {
   console.error('No apps configured — set SONARR_URL/SONARR_API_KEY and/or RADARR_URL/RADARR_API_KEY (add _2, _3 ... for more instances).');
   process.exit(1);
 }
-console.log(`plungarr starting: apps=[${CONFIG.apps.map(a => a.name).join(', ')}] interval=${CONFIG.intervalSec}s minAge=${CONFIG.minAgeMin}m dryRun=${CONFIG.dryRun} corruptSweep=${CONFIG.corrupt.enabled ? `every ${CONFIG.corrupt.sweepHours}h (report-only)` : 'off'} failReview=${CONFIG.failReview.enabled ? `every ${CONFIG.failReview.everyHours}h (>=${CONFIG.failReview.failLimit} fails/${CONFIG.failReview.windowHours}h)` : 'off'} stallWatch=${CONFIG.sab.url && CONFIG.sab.key ? `on (head <${CONFIG.sab.minProgressMb}MB/${CONFIG.sab.stallMin}min, doomed >${Math.round(CONFIG.sab.missingFrac * 100)}% missing, ${CONFIG.sab.maxActions}/cycle)` : 'off (set SABNZBD_URL + SABNZBD_API_KEY)'}`);
+console.log(`plungarr starting: apps=[${CONFIG.apps.map(a => a.name).join(', ')}] interval=${CONFIG.intervalSec}s minAge=${CONFIG.minAgeMin}m dryRun=${CONFIG.dryRun} corruptSweep=${CONFIG.corrupt.enabled ? `every ${CONFIG.corrupt.sweepHours}h (report-only)` : 'off'} failReview=${CONFIG.failReview.enabled ? `every ${CONFIG.failReview.everyHours}h (>=${CONFIG.failReview.failLimit} fails/${CONFIG.failReview.windowHours}h)` : 'off'} stallWatch=${CONFIG.sab.url && CONFIG.sab.key ? `on (head <${CONFIG.sab.minProgressMb}MB/${CONFIG.sab.stallMin}min, doomed >${Math.round(CONFIG.sab.missingFrac * 100)}% missing, ${CONFIG.sab.maxActions}/cycle)` : 'off (set SABNZBD_URL + SABNZBD_API_KEY)'} leftovers=${CONFIG.leftover.dirs.length ? `every ${CONFIG.leftover.everyHours}h in ${CONFIG.leftover.dirs.join(',')} (${CONFIG.leftover.action}, >${CONFIG.leftover.minAgeHours}h old)` : 'off (set LEFTOVER_DIRS)'}`);
 await notifyStartup();
 await cycle();
 if (!CONFIG.runOnce) setInterval(cycle, CONFIG.intervalSec * 1000);

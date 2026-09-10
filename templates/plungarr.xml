@@ -16,7 +16,7 @@
   <License>MIT</License>
   <ExtraSearchTerms>sonarr radarr sabnzbd queue stuck import stalled janitor</ExtraSearchTerms>
   <Requires>Sonarr and/or Radarr reachable from this container with an API key. SABnzbd is optional.</Requires>
-  <Changes>Orphaned downloads (series or movie deleted mid-download, NZB added by hand) are removed via ORPHAN_ACTION. Sonarr folder-name mismatches caused by parser quirks are imported with Sonarr's own mapping via FOLDER_MISMATCH_ACTION; possible real mislabels are reported. Matched-by-ID downloads with nothing left to import are cleared. Configurable actions for archive, dangerous-file, sample and not-an-upgrade blocks. Optional webhook notifications with daily/weekly/monthly digests.</Changes>
+  <Changes>Optional leftover-folder sweep for SABnzbd's completed directory (LEFTOVER_DIRS, notify or delete). Orphaned downloads (series or movie deleted mid-download, NZB added by hand) are removed via ORPHAN_ACTION. Sonarr folder-name mismatches caused by parser quirks are imported with Sonarr's own mapping via FOLDER_MISMATCH_ACTION; possible real mislabels are reported. Matched-by-ID downloads with nothing left to import are cleared. Configurable actions for archive, dangerous-file, sample and not-an-upgrade blocks. Optional webhook notifications with daily/weekly/monthly digests.</Changes>
   <Date>2026-09-10</Date>
   <ExtraParams/>
   <PostArgs/>
@@ -60,4 +60,8 @@
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID the service runs as." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Timezone" Target="TZ" Default="" Mode="" Description="Container timezone for digest scheduling, e.g. Europe/London or America/New_York." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="State" Target="/state" Default="/mnt/user/appdata/plungarr" Mode="rw" Description="Persists first-seen ages and loop guards across restarts." Type="Path" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Completed downloads" Target="/downloads" Default="" Mode="rw" Description="Optional. SABnzbd's completed folder (the one holding tv/, movies/, ...). Needed only for the leftover-folder sweep; set Leftover dirs too. Read-only is enough unless Leftover action is delete." Type="Path" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Leftover dirs" Target="LEFTOVER_DIRS" Default="" Mode="" Description="Container paths whose children are job folders, e.g. /downloads/tv,/downloads/movies. Empty keeps the leftover sweep off. SABnzbd never deletes completed job folders and an arr only cleans up its own, so folders nobody references pile up." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Leftover action" Target="LEFTOVER_ACTION" Default="notify" Mode="" Description="notify (report each unreferenced old folder in the digest) or delete (remove it; needs the path mapped read-write). Only direct children of the leftover dirs, never symlinks." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Leftover minimum age hours" Target="LEFTOVER_MIN_AGE_HOURS" Default="24" Mode="" Description="A folder is a leftover only if neither it nor any file in it changed within this many hours." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

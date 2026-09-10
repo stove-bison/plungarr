@@ -56,13 +56,14 @@
 <tr><td>Completed or failed download that no configured arr grabbed: a series or movie deleted while it was downloading, or an NZB added by hand</td><td><code>ORPHAN_ACTION</code>, default <strong>delete</strong>: removed from the queue and the download client, no blocklist, no search. Never while another configured instance owns it.</td></tr>
 <tr><td>“No files found are eligible for import”, or a season pack that is one video file</td><td>Remove, blocklist, search for a replacement</td></tr>
 <tr><td>Dead usenet post at the head of the SABnzbd queue: under 5 MB of progress in 45 minutes, or most articles missing</td><td>Remove through the arr that grabbed it, blocklist, search again. One per cycle, so live downloads keep going.</td></tr>
+<tr><td>Job folder in the download client's completed directory that no arr queue item and no SAB job references any more, unchanged for a day (optional, needs the folder mounted)</td><td><code>LEFTOVER_ACTION</code>, default <strong>notify</strong>: reported with size and age. <code>delete</code> removes it. SABnzbd never deletes completed job folders and an arr only cleans up its own.</td></tr>
 <tr><td>Anything else</td><td>Logged, sent to your notifications if configured, and left alone. It never guesses.</td></tr>
 </tbody></table></div>
 
 <div class="never">
 <p><strong>What it never does</strong></p>
 <ul>
-<li>Never deletes a library file. The library review is report-only, always.</li>
+<li>Never deletes a library file. The library review is report-only, always. Leftover download folders are deleted only when you opt in, only direct children of the folders you name, never through a symlink.</li>
 <li>Never imports a file that maps to a different series or movie than the one that was grabbed.</li>
 <li>Never acts on a state it does not recognise. Unknown means notify.</li>
 <li>Never races an import in progress: transitional items must be seen stuck across two cycles first.</li>

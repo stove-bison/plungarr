@@ -63,6 +63,25 @@ Enabled by setting `SABNZBD_URL` + `SABNZBD_API_KEY`.
 | Head wedged in Checking/Verifying/Repairing for hours | `STALL-NOTIFY` only — long par2 repairs are legitimate work, and a true wedge needs a SAB restart, which is deliberately not automated |
 | Stalled/dead download no configured arr is tracking | Deleted in SAB directly (`ORPHAN` log line), only after complete ownership checks. Configure every arr sharing this SAB instance. |
 
+### Leftover download folders (every 6h, optional)
+
+Enabled by setting `LEFTOVER_DIRS` to the container paths whose children are
+job folders, with the download client's completed folder mounted into the
+container (for example `/mnt/user/data/downloads/sabnzbd/complete` at
+`/downloads`, then `LEFTOVER_DIRS=/downloads/tv,/downloads/movies`).
+
+SABnzbd never deletes anything in its completed folder ([by design](https://github.com/sabnzbd/sabnzbd/issues/2840)),
+and an arr only cleans up jobs it grabbed. Job folders nobody references any
+more pile up: series deleted mid-download, NZBs added by hand, failed orphans.
+
+| Situation | Action |
+|---|---|
+| Job folder that no configured arr queue item and no SAB queue or active-history job references, unchanged for `LEFTOVER_MIN_AGE_HOURS` (default 24) | `LEFTOVER_ACTION`, default **notify**: one line per folder with file count, size and last change, in the attention digest. `delete` removes it (needs a read-write mount). |
+| Any arr or SAB read fails, or SAB is paused | Sweep skipped. A partial view never makes a folder look unowned. |
+
+Only real directories that are direct children of `LEFTOVER_DIRS` are ever
+considered; symlinks and loose files are ignored.
+
 ### Notifications (optional)
 
 Off unless `NOTIFY_URL` is set; without it everything still goes to the
@@ -160,6 +179,9 @@ Everything is an environment variable with a sane default — see
 | `RUN_ONCE` | false | Run one cycle and finish the periodic reviews before exiting |
 | `PUID` / `PGID` | 99 / 100 | User and group the service runs as; `/state` is chowned to them at start |
 | `CORRUPT_REPORT_CLASSES` | unreadable,stub,junk_readable | Suspect classes to report; add `tiny_readable` and/or `scanner_blind` for the full list |
+| `LEFTOVER_DIRS` | — | Container paths whose children are download job folders; empty keeps the leftover sweep off |
+| `LEFTOVER_ACTION` | notify | Unreferenced old job folder: `notify` or `delete` |
+| `LEFTOVER_MIN_AGE_HOURS` / `LEFTOVER_HOURS` | 24 / 6 | Minimum age of a leftover; hours between sweeps |
 | `ARCHIVE_ACTION` | replace | Unextracted archive: `replace`, `discard`, or `notify` |
 | `DANGEROUS_FILE_ACTION` | replace | Dangerous or executable file: `replace`, `discard`, or `notify` |
 | `SAMPLE_ACTION` | notify | File flagged as a sample: `replace`, `discard`, or `notify` |
@@ -191,6 +213,9 @@ Everything is an environment variable with a sane default — see
   snapshots stop the removal; SAB queue observation is also paginated.
 - Invalid numeric or boolean configuration stops startup with the setting name.
 - Per-item action dedupe (30 min) while the arr catches up.
+- Leftover folder deletion is opt-in, limited to direct children of
+  `LEFTOVER_DIRS`, never follows symlinks, and is cancelled by any failed arr
+  or SAB read.
 - `DRY_RUN=true` to watch what it *would* do first.
 
 The older `CORRUPT_MAX_DELETES`, `CORRUPT_LOOP_LIMIT`,

@@ -31,6 +31,7 @@
   -o /boot/config/plugins/dockerMan/templates-user/plungarr.xml</code></pre>
 <p>Reload the Docker page, click “Add Container”, and pick plungarr from the template list.</p>
 <p>State lives in <code>/mnt/user/appdata/plungarr</code>. The container makes that folder writable for the user it runs as (<code>PUID</code>/<code>PGID</code>, default 99/100), so no manual permissions step is needed.</p>
+<p>Optional: to have plungarr report (or delete) leftover job folders in SABnzbd's completed directory, map that directory to <code>/downloads</code> under “Show more settings” and set <code>LEFTOVER_DIRS</code> to the category folders inside it, for example <code>/downloads/tv,/downloads/movies</code>. Read-only is enough for reporting.</p>
 
 <h3 id="unraid-update">Updating on Unraid</h3>
 <p>Docker tab, “Check for Updates”, then “apply update” on plungarr. Updates pull the new image only. New settings added in later versions do not appear on an existing container's form; add them with “Add another Path, Port, Variable” in Edit, or reinstall from the template.</p>
@@ -47,7 +48,9 @@ docker compose up -d --build</code></pre>
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./state:/state</code></pre>
+      - ./state:/state
+      # optional, for the leftover-folder sweep (LEFTOVER_DIRS=/downloads/tv,...):
+      # - /path/to/sabnzbd/complete:/downloads:ro</code></pre>
 <p>Watch it work:</p>
 <pre><code>docker logs -f plungarr</code></pre>
 

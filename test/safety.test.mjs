@@ -17,7 +17,9 @@ const state = () => ({ firstSeen: {}, actioned: {}, blocklistCount: {}, corruptC
 
 function harness(env = {}) {
   let now = Date.UTC(2026, 0, 1);
-  const calls = [], logs = [], disk = new Map(), posts = [];
+  const calls = [], logs = [], disk = new Map(), posts = [], removed = [];
+  const fsMock = { readFileSync: p => { if (!disk.has(p)) throw Error('absent'); return disk.get(p); },
+    mkdirSync() {}, writeFileSync: (p, text) => disk.set(p, text) };
   const fixture = {
     post: async (url, headers, body) => { posts.push({ url, headers, body }); },
     api: async (app, method, url, body) => {
@@ -34,8 +36,7 @@ function harness(env = {}) {
     process: { env: { SONARR_URL: sonarr.url, SONARR_API_KEY: 'fixture',
       SABNZBD_URL: 'http://sab.invalid', SABNZBD_API_KEY: 'fixture', ...env } },
     Date: class extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } },
-    fs: { readFileSync: p => { if (!disk.has(p)) throw Error('absent'); return disk.get(p); },
-      mkdirSync() {}, writeFileSync: (p, text) => disk.set(p, text) },
+    fs: fsMock,
     path, URL, URLSearchParams, AbortSignal,
     fetch: () => { throw new Error('Real network is forbidden in this harness'); },
     console: { log: (...args) => logs.push(args.join(' ')), error: (...args) => logs.push(args.join(' ')) },
@@ -47,9 +48,9 @@ function harness(env = {}) {
     notifyPost = (...args) => fixture.post(...args);
     globalThis.subject = { CONFIG, classifyFile, corruptSweepApp, corruptSweep,
       processApp, stallSweep, stallRemove, verifiedImport, saveState, loadState,
-      log, notifyFlush, buildPayload, categoryOf };
+      log, notifyFlush, buildPayload, categoryOf, leftoverSweep };
   `, context);
-  return { ...context.subject, calls, logs, disk, fixture, posts,
+  return { ...context.subject, calls, logs, disk, fixture, posts, removed, fs: fsMock, now: () => now,
     advance: minutes => { now += minutes * 60000; }, setNow: ts => { now = ts; } };
 }
 
@@ -969,6 +970,159 @@ test('E2: the same rejection on an import candidate routes through NOT_UPGRADE_A
   await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
   assert.equal(deletes(h).length, 0);
   assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('NOT_UPGRADE_ACTION')));
+});
+
+// ---------- leftover download folders ----------
+// Fake download tree: tree[dir] = { name: { kind: 'dir'|'file'|'link', mtime, size, children } }.
+function downloads(h, dirs) {
+  const nodes = new Map();
+  const put = (full, node) => nodes.set(full.replace(/\\/g, '/'), node);
+  for (const [dir, entries] of Object.entries(dirs)) {
+    put(dir, { kind: 'dir', mtime: h.now() - 30 * 86400000, size: 0, children: Object.keys(entries) });
+    for (const [name, e] of Object.entries(entries)) {
+      const full = `${dir}/${name}`;
+      if (e.kind === 'link' || e.kind === 'file') { put(full, { kind: e.kind, mtime: e.mtime ?? h.now() - 3 * 86400000, size: e.size || 0, children: [] }); continue; }
+      const files = e.files || [];
+      put(full, { kind: 'dir', mtime: e.mtime ?? h.now() - 3 * 86400000, size: 0, children: files.map(f => f[0]) });
+      for (const [fname, size, mtime] of files) put(`${full}/${fname}`, { kind: 'file', mtime: mtime ?? h.now() - 3 * 86400000, size, children: [] });
+    }
+  }
+  const get = p => { const n = nodes.get(String(p).replace(/\\/g, '/')); if (!n) { const err = new Error('ENOENT: ' + p); err.code = 'ENOENT'; throw err; } return n; };
+  const dirent = (name, n) => ({ name, isDirectory: () => n.kind === 'dir', isFile: () => n.kind === 'file', isSymbolicLink: () => n.kind === 'link' });
+  h.fs.readdirSync = (p, opts) => { const n = get(p); if (n.kind !== 'dir') throw new Error('ENOTDIR'); return n.children.map(c => opts?.withFileTypes ? dirent(c, get(`${String(p).replace(/\\/g, '/')}/${c}`)) : c); };
+  h.fs.lstatSync = p => { const n = get(p); return { mtimeMs: n.mtime, size: n.size, isSymbolicLink: () => n.kind === 'link', isDirectory: () => n.kind === 'dir' }; };
+  h.fs.rmSync = (p, opts) => { h.removed.push({ path: String(p).replace(/\\/g, '/'), opts }); get(p); nodes.delete(String(p).replace(/\\/g, '/')); };
+  return nodes;
+}
+// SAB answers for the ownership check: an unpaused queue and an active history.
+function sabJobs(h, { queue = [], history = [] } = {}) {
+  h.fixture.sab = async params => {
+    h.calls.push({ sab: params });
+    if (params.mode === 'queue') return { queue: { paused: false, noofslots_total: queue.length, noofslots: queue.length, slots: queue.slice(params.start, params.start + params.limit) } };
+    if (params.mode === 'history') return { history: { noofslots: history.length, slots: history.slice(params.start, params.start + params.limit) } };
+    throw new Error('Unexpected SAB call ' + params.mode);
+  };
+}
+const leftovers = h => h.logs.filter(l => l.includes('| LEFTOVER |'));
+const LEFT = { LEFTOVER_DIRS: '/downloads/tv,/downloads/movies' };
+
+test('L1: an old folder no arr or SAB job references is reported with its size, not deleted', async () => {
+  const h = harness(LEFT), st = state(); sabJobs(h);
+  downloads(h, { '/downloads/tv': { 'Old.Job': { files: [['a.mkv', 1.5e9], ['a.nfo', 1000]] } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(leftovers(h).length, 1);
+  assert.match(leftovers(h)[0], /Old\.Job.*2 file\(s\).*LEFTOVER_ACTION=delete/);
+  assert.equal(h.removed.length, 0);
+  assert.equal(h.categoryOf('LEFTOVER'), 'attention');
+});
+
+test('L2: a folder an arr queue record points at is never a leftover', async () => {
+  const h = harness(LEFT), st = state(); sabJobs(h);
+  const fallback = h.fixture.api;
+  h.fixture.api = async (app, method, url, body) => url.startsWith('/queue')
+    ? { page: 1, totalRecords: 1, records: [{ id: 1, downloadId: 'x', seriesId: 1, title: 'Show.S01E01', outputPath: '/data/sab/complete/tv/Show.S01E01.Group/' }] }
+    : fallback(app, method, url, body);
+  downloads(h, { '/downloads/tv': { 'Show.S01E01.Group': { files: [['a.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(leftovers(h).length, 0);
+});
+
+test('L3: folders SAB still lists in its queue or active history are never leftovers', async () => {
+  const h = harness(LEFT), st = state();
+  sabJobs(h, { queue: [{ nzo_id: 'q1', filename: 'Downloading.Now', status: 'Downloading' }],
+    history: [{ nzo_id: 'h1', name: 'Just.Finished', status: 'Completed', storage: '/data/sab/complete/tv/Just.Finished' }] });
+  downloads(h, { '/downloads/tv': { 'Downloading.Now': { files: [['a.mkv', 1e9]] }, 'Just.Finished': { files: [['b.mkv', 1e9]] }, 'Gone.Job': { files: [['c.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(leftovers(h).length, 1);
+  assert.match(leftovers(h)[0], /Gone\.Job/);
+});
+
+test('L4: a folder younger than LEFTOVER_MIN_AGE_HOURS, by folder or by newest file, is left alone', async () => {
+  const h = harness(LEFT), st = state(); sabJobs(h);
+  downloads(h, { '/downloads/tv': {
+    'Fresh.Dir': { mtime: h.now() - 3600000, files: [['a.mkv', 1e9]] },
+    'Old.Dir.Fresh.File': { files: [['a.mkv', 1e9, h.now() - 3600000]] },
+  }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(leftovers(h).length, 0);
+});
+
+test('L5: LEFTOVER_ACTION=delete removes only unreferenced old folders', async () => {
+  const h = harness({ ...LEFT, LEFTOVER_ACTION: 'delete' }), st = state();
+  sabJobs(h, { history: [{ nzo_id: 'h1', name: 'Keep.Me', status: 'Completed', storage: '/x/tv/Keep.Me' }] });
+  downloads(h, { '/downloads/tv': { 'Keep.Me': { files: [['a.mkv', 1e9]] }, 'Remove.Me': { files: [['b.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.deepEqual(h.removed.map(r => r.path), ['/downloads/tv/Remove.Me']);
+  assert.ok(h.removed[0].opts.recursive);
+  assert.ok(h.logs.some(l => l.includes('LEFTOVER-DELETED') && l.includes('Remove.Me')));
+  assert.equal(h.categoryOf('LEFTOVER-DELETED'), 'actions');
+});
+
+test('L6: a failed arr or SAB read cancels the whole sweep', async () => {
+  const h = harness({ ...LEFT, LEFTOVER_ACTION: 'delete' }), st = state(); sabJobs(h);
+  h.fixture.api = async () => { throw new Error('connection refused'); };
+  downloads(h, { '/downloads/tv': { 'Old.Job': { files: [['a.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await assert.rejects(() => h.leftoverSweep(st));
+  assert.equal(h.removed.length, 0); assert.equal(leftovers(h).length, 0);
+  const h2 = harness({ ...LEFT, LEFTOVER_ACTION: 'delete' }), st2 = state();
+  h2.fixture.sab = async () => { throw new Error('sab down'); };
+  downloads(h2, { '/downloads/tv': { 'Old.Job': { files: [['a.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await assert.rejects(() => h2.leftoverSweep(st2));
+  assert.equal(h2.removed.length, 0);
+});
+
+test('L7: a paused SAB queue hides its jobs, so nothing is deleted', async () => {
+  const h = harness({ ...LEFT, LEFTOVER_ACTION: 'delete' }), st = state();
+  h.fixture.sab = async params => params.mode === 'queue' ? { queue: { paused: true, noofslots_total: 0, noofslots: 0, slots: [] } } : { history: { noofslots: 0, slots: [] } };
+  downloads(h, { '/downloads/tv': { 'Old.Job': { files: [['a.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await assert.rejects(() => h.leftoverSweep(st));
+  assert.equal(h.removed.length, 0);
+});
+
+test('L8: files and symlinks at the top level are never reported or removed', async () => {
+  const h = harness({ ...LEFT, LEFTOVER_ACTION: 'delete' }), st = state(); sabJobs(h);
+  downloads(h, { '/downloads/tv': { 'stray.nzb': { kind: 'file', size: 10 }, 'linked': { kind: 'link' } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(h.removed.length, 0); assert.equal(leftovers(h).length, 0);
+});
+
+test('L9: dry run logs the intended deletion, removes nothing, and cannot postpone the live sweep', async () => {
+  const h = harness({ ...LEFT, LEFTOVER_ACTION: 'delete', DRY_RUN: 'true' }), st = state(); sabJobs(h);
+  downloads(h, { '/downloads/tv': { 'Old.Job': { files: [['a.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(h.removed.length, 0);
+  assert.ok(h.logs.some(l => l.includes('DRY-RUN') && l.includes('Old.Job')));
+  assert.equal(st.lastLeftoverSweep, undefined);
+  h.CONFIG.dryRun = false;
+  await h.leftoverSweep(st);
+  assert.equal(h.removed.length, 1);
+});
+
+test('L10: the sweep runs once per LEFTOVER_HOURS', async () => {
+  const h = harness({ ...LEFT, LEFTOVER_HOURS: '6' }), st = state(); sabJobs(h);
+  downloads(h, { '/downloads/tv': { 'Old.Job': { files: [['a.mkv', 1e9]] } }, '/downloads/movies': {} });
+  await h.leftoverSweep(st); await h.leftoverSweep(st);
+  assert.equal(h.logs.filter(l => l.includes('LEFTOVER-SWEEP-DONE')).length, 1);
+  h.advance(6 * 60 + 1); await h.leftoverSweep(st);
+  assert.equal(h.logs.filter(l => l.includes('LEFTOVER-SWEEP-DONE')).length, 2);
+});
+
+test('L11: invalid leftover settings fail startup with the setting name; unset dirs keep the sweep off', async () => {
+  assert.throws(() => harness({ LEFTOVER_DIRS: 'downloads/tv' }), /LEFTOVER_DIRS/);
+  assert.throws(() => harness({ ...LEFT, LEFTOVER_ACTION: 'replace' }), /LEFTOVER_ACTION/);
+  assert.throws(() => harness({ ...LEFT, LEFTOVER_MIN_AGE_HOURS: 'soon' }), /LEFTOVER_MIN_AGE_HOURS/);
+  const h = harness(), st = state();
+  h.fs.readdirSync = () => { throw new Error('must not touch the disk'); };
+  await h.leftoverSweep(st);
+  assert.equal(h.logs.filter(l => l.includes('LEFTOVER')).length, 0);
+});
+
+test('L12: an empty folder is reported as empty', async () => {
+  const h = harness(LEFT), st = state(); sabJobs(h);
+  downloads(h, { '/downloads/tv': { '_FAILED_Old.Job': {} }, '/downloads/movies': {} });
+  await h.leftoverSweep(st);
+  assert.equal(leftovers(h).length, 1);
+  assert.match(leftovers(h)[0], /_FAILED_Old\.Job.*empty/);
 });
 
 // ---------- multiple arr instances ----------

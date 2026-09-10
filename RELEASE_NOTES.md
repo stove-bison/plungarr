@@ -89,6 +89,30 @@
   parsed as one episode holding a double episode), and that case is
   reported instead of imported.
 
+# Leftover download folders
+
+- New optional sweep for job folders in the download client's completed
+  directory that nothing references any more. SABnzbd never deletes
+  anything in its completed folder (by design, per its maintainers), and an
+  arr only cleans up jobs it grabbed, so folders from deleted series,
+  hand-added NZBs and failed orphans accumulate. One test system held 260
+  such folders, 89 GB, most of them empty `_FAILED_` shells.
+- Enable it by mounting the completed folder into the container and setting
+  `LEFTOVER_DIRS` to the folders whose children are jobs, e.g.
+  `/downloads/tv,/downloads/movies`. A folder is a leftover when no
+  configured arr queue item and no SAB queue or active-history job
+  references its name, and neither it nor any file in it changed within
+  `LEFTOVER_MIN_AGE_HOURS` (default 24). Sweeps run every `LEFTOVER_HOURS`
+  (default 6).
+- `LEFTOVER_ACTION` defaults to `notify`: one `LEFTOVER` line per folder
+  with file count, size and last change, in the attention digest, reminded
+  after `NOTIFY_REMIND_DAYS`. `delete` removes the folder (needs a
+  read-write mount), logged as `LEFTOVER-DELETED` and counted in digests.
+- Safety: only real directories that are direct children of `LEFTOVER_DIRS`
+  are considered, symlinks and loose files are ignored, and any failed arr
+  or SAB read (or a paused SAB queue) cancels the sweep. Dry run logs the
+  intended deletions and never postpones the live sweep.
+
 # Nothing left to import
 
 - A download blocked on a technicality ("matched by ID", "unable to
