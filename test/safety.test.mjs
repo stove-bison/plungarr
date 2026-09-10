@@ -804,7 +804,7 @@ const pending = (id, messages, extra = {}) => blocked(id, messages, { trackedDow
 
 test('U1: a mismatch whose candidate maps exactly the grabbed episode is imported with the candidate mapping', async () => {
   const h = harness(), st = state();
-  h.candidates = [{ path: '/x/1x8_720.mkv', series: { id: 1 }, episodes: [{ id: 41 }], quality: { q: 1 },
+  h.candidates = [{ path: '/x/1x8_720.mkv', series: { id: 1 }, episodes: [{ id: 41, seasonNumber: 1, episodeNumber: 8 }], quality: { q: 1 },
     rejections: [{ reason: UNEXPECTED }] }];
   queued(h, [pending(1, [UNEXPECTED])]);
   await h.processApp(sonarr, st); assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
@@ -856,11 +856,75 @@ test('U5: FOLDER_MISMATCH_ACTION=notify leaves the item and names the setting', 
 
 test('U6: dry run reports the intended import and sends no command', async () => {
   const h = harness({ DRY_RUN: 'true' }), st = state();
-  h.candidates = [{ path: '/x/1x8_720.mkv', series: { id: 1 }, episodes: [{ id: 41 }], rejections: [{ reason: UNEXPECTED }] }];
+  h.candidates = [{ path: '/x/1x8_720.mkv', series: { id: 1 }, episodes: [{ id: 41, seasonNumber: 1, episodeNumber: 8 }], rejections: [{ reason: UNEXPECTED }] }];
   queued(h, [pending(1, [UNEXPECTED])]);
   await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
   assert.equal(h.calls.filter(c => c.method !== 'GET').length, 0);
   assert.ok(h.logs.some(l => l.includes('DRY-RUN import')));
+});
+
+test('U7: a small same-season mismatch looks like a real mislabel and is left for a human', async () => {
+  const h = harness(), st = state();
+  const SAME = 'Episodes 1x22, 1x23 were unexpected considering the Release.1 folder name';
+  h.candidates = [{ path: '/x/S01E22-23.mkv', series: { id: 1 }, episodes: [{ id: 41, seasonNumber: 1, episodeNumber: 21 }], rejections: [{ reason: SAME }] }];
+  queued(h, [pending(1, [SAME])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+  assert.equal(deletes(h).length, 0);
+  assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('same season')));
+});
+
+test('U8: a same-season parser runaway (many unexpected episodes) is still imported', async () => {
+  const h = harness(), st = state();
+  const RUNAWAY = 'Episodes 1x20, 1x21, 1x22, 1x23, 1x24, 1x25, 1x26 were unexpected considering the Release.1 folder name';
+  h.candidates = [{ path: '/x/1x19_720.mkv', series: { id: 1 }, episodes: [{ id: 41, seasonNumber: 1, episodeNumber: 19 }], rejections: [{ reason: RUNAWAY }] }];
+  queued(h, [pending(1, [RUNAWAY])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.ok(h.calls.find(c => c.url === '/command'), 'ManualImport command sent');
+});
+
+test('U9: a mismatch whose rejection names no episodes is left for a human', async () => {
+  const h = harness(), st = state();
+  const VAGUE = 'Episode was unexpected considering the Release.1 folder name';
+  h.candidates = [{ path: '/x/a.mkv', series: { id: 1 }, episodes: [{ id: 41, seasonNumber: 1, episodeNumber: 8 }], rejections: [{ reason: VAGUE }] }];
+  queued(h, [pending(1, [VAGUE])]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+  assert.equal(deletes(h).length, 0);
+});
+
+// ---------- importable classification but nothing to import ----------
+const candidatesByFilter = (h, filtered, unfiltered) => {
+  const fallback = h.fixture.api;
+  h.fixture.api = async (app, method, url, body) => url.startsWith('/manualimport')
+    ? (h.calls.push({ app: app.name, method, url, body }), url.includes('filterExistingFiles=false') ? unfiltered : filtered)
+    : fallback(app, method, url, body);
+};
+
+test('Z1: matched-by-ID with no files at all is replaced like an empty download', async () => {
+  const h = harness(), st = state(); queued(h, [blocked(1, ['matched to series by ID'])]);
+  candidatesByFilter(h, [], []);
+  await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /blocklist=true&skipRedownload=false/);
+  assert.ok(h.calls.some(c => c.url.includes('filterExistingFiles=false')), 'checked without the existing-file filter first');
+});
+
+test('Z2: matched-by-ID whose files are all already in the library is discarded', async () => {
+  const h = harness(), st = state(); queued(h, [blocked(1, ['matched to series by ID'])]);
+  candidatesByFilter(h, [], [{ path: '/x/a.mkv', series: { id: 1 }, episodes: [{ id: 41 }], rejections: [] }]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(deletes(h).length, 1);
+  assert.match(deletes(h)[0].url, /blocklist=true&skipRedownload=true/);
+  assert.equal(h.calls.filter(c => c.url === '/command').length, 0);
+});
+
+test('Z3: dry run reports the intended removal for an empty matched-by-ID download and sends nothing', async () => {
+  const h = harness({ DRY_RUN: 'true' }), st = state(); queued(h, [blocked(1, ['matched to series by ID'])]);
+  candidatesByFilter(h, [], []);
+  await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.method !== 'GET').length, 0);
+  assert.ok(h.logs.some(l => l.includes('DRY-RUN')));
 });
 
 // ---------- existing library file covers more episodes ----------

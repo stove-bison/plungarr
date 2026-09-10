@@ -20,14 +20,14 @@ download only counts as an orphan when no configured instance owns it.
 
 | Situation | Action |
 |---|---|
-| Completed download blocked on an ignorable technicality ("matched to series/movie **by ID**", "unable to determine if **sample**") | Verify every import candidate maps to the exact series/movie that was grabbed, then **force import**. A mapping mismatch is never imported. |
+| Completed download blocked on an ignorable technicality ("matched to series/movie **by ID**", "unable to determine if **sample**") | Verify every import candidate maps to the exact series/movie that was grabbed, then **force import**. A mapping mismatch is never imported. No video files at all (folder gone) is treated like "no files eligible"; files that are all already in the library go through `NOT_UPGRADE_ACTION`. |
 | "**No files found are eligible** for import" (empty or failed extraction) | Remove + blocklist + search for a replacement |
 | Season "pack" that is **one video file** | Remove + blocklist + search for a replacement |
 | Download that is **not an upgrade** for the existing file (reported on the queue item or on its import candidates) | `NOT_UPGRADE_ACTION`, default **discard**: remove + blocklist, keep the library file |
 | **Archive** the download client never extracted ("Found archive file, might need to be extracted") | `ARCHIVE_ACTION`, default **replace** |
 | **Dangerous or executable file** in the download | `DANGEROUS_FILE_ACTION`, default **replace** |
 | File flagged as a **sample** | `SAMPLE_ACTION`, default **notify** (short-form shows trip the sample detector on real episodes) |
-| Sonarr: **file name disagrees with the folder name** ("Episode 7x20 was unexpected considering the ... folder name", usually a parser quirk like `1x8_720.mkv`) | `FOLDER_MISMATCH_ACTION`, default **import**: use Sonarr's own file-to-episode mapping, only when it covers exactly the episodes that were grabbed. Anything else is reported. Also takes `replace`, `discard`, `notify`. |
+| Sonarr: **file name disagrees with the folder name** ("Episode 7x20 was unexpected considering the ... folder name", usually a parser quirk like `1x8_720.mkv`) | `FOLDER_MISMATCH_ACTION`, default **import**: use Sonarr's own file-to-episode mapping, only when it covers exactly the episodes that were grabbed and the unexpected episodes point at another season or run away into more than five (a parser quirk). A few extra episodes in the same season looks like a real mislabel and is reported. Also takes `replace`, `discard`, `notify`. |
 | Single-episode file that would replace a library file **spanning more episodes** | Treated as not an upgrade: `NOT_UPGRADE_ACTION` |
 | Completed or failed download **no configured arr grabbed** (series or movie deleted mid-download, NZB added by hand) | `ORPHAN_ACTION`, default **delete**: remove from the queue and the download client, no blocklist, no search. `notify` only reports it. Never fires while another configured instance owns the download. |
 | Anything it doesn't recognize | `NOTIFY` log line, left untouched. Never guess. |

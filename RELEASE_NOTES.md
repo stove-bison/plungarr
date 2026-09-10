@@ -78,6 +78,21 @@
   maps outside the grab, or a set that does not cover it, is reported and
   left for a human. `replace`, `discard`, and `notify` behave as for the
   other block actions.
+- The import also requires the mismatch to look like a parser quirk: the
+  unexpected episodes Sonarr names are in another season, or there are
+  more than five of them. A few unexpected episodes in the same season is
+  what a genuinely mislabelled file looks like (a release folder that
+  parsed as one episode holding a double episode), and that case is
+  reported instead of imported.
+
+# Nothing left to import
+
+- A download blocked on a technicality ("matched by ID", "unable to
+  determine if sample") whose folder is gone or holds no video is now
+  handled like Sonarr's own "No files found are eligible" case: removed,
+  blocklisted, and searched again. One whose files are all already in the
+  library goes through `NOT_UPGRADE_ACTION`. Previously both were reported
+  every cycle and never cleared.
 - A single-episode download that would replace a library file spanning more
   episodes ("Episode file on disk contains more episodes than this file
   contains") is now treated as not an upgrade, so `NOT_UPGRADE_ACTION`

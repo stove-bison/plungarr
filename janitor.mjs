@@ -225,6 +225,7 @@ const ACTION_REASON = {
   sample: 'flagged as a sample', not_upgrade: 'not an upgrade for the existing file',
   folder_mismatch: 'file episodes disagree with the release folder name',
   orphan: 'no configured arr grabbed this download',
+  dead_empty: 'no importable files', dead_bundle: 'season pack is a single file',
 };
 // Values a NOTIFY line suggests for auto-clearing each class.
 const ACTION_AUTO = { folder_mismatch: 'import, replace or discard', orphan: 'delete' };
@@ -313,11 +314,25 @@ async function removeItems(app, recs, { blocklist, research }) {
 // Episode ids the arr grabbed this download for (v3 episodeId, v5 episodeIds).
 const grabbedEpisodeIds = group => new Set(group.flatMap(r => r.episodeIds || (r.episodeId ? [r.episodeId] : [])));
 
+// Episode numbers a MatchesFolderSpecification rejection names as unexpected.
+const unexpectedEpisodes = reasons => {
+  const out = [];
+  for (const r of reasons) {
+    const head = String(r).split(/\b(?:was|were) unexpected\b/)[0];
+    for (const m of head.matchAll(/(\d+)x(\d+)/g)) out.push({ season: +m[1], episode: +m[2] });
+  }
+  return out;
+};
+
 async function verifiedImport(app, rec, group = [rec]) {
   const cands = await api(app, 'GET', `/manualimport?downloadId=${rec.downloadId}&filterExistingFiles=true`);
   if (!Array.isArray(cands) || !cands.length) {
-    log(app.name, 'NOTIFY', rec.title, 'no manual-import candidates despite importable classification');
-    return false;
+    // The arr blocked on a technicality before looking at files. No candidate
+    // at all means the folder is gone or holds no video (same as its own "No
+    // files found are eligible" case); candidates only without the filter
+    // mean every file is already in the library.
+    const all = await api(app, 'GET', `/manualimport?downloadId=${rec.downloadId}&filterExistingFiles=false`);
+    return Array.isArray(all) && all.length ? 'not_upgrade' : 'dead_empty';
   }
   // A candidate the arr rejects for a reason plungarr has a policy for
   // (not an upgrade, sample) is skipped here; if nothing else is importable
@@ -340,6 +355,17 @@ async function verifiedImport(app, rec, group = [rec]) {
         if (app.kind !== 'series' || !ids.length || !ids.every(id => grabbed.has(id))) {
           log(app.name, 'NOTIFY', c.relativePath || rec.title,
             `folder-name mismatch and the file maps to episodes outside the grab (${ids.join(',') || 'none'}); left for a human`);
+          return false;
+        }
+        // A parser quirk names another season ("1x8_720" reads as 7x20) or
+        // runs away into dozens of episodes. A few extra episodes in the same
+        // season is what a genuinely mislabelled file looks like.
+        const unexpected = unexpectedEpisodes(rej);
+        const seasons = new Set((c.episodes || []).map(e => e.seasonNumber));
+        const sameSeason = unexpected.filter(u => seasons.has(u.season));
+        if (!unexpected.length || seasons.has(undefined) || (sameSeason.length && unexpected.length <= 5)) {
+          log(app.name, 'NOTIFY', c.relativePath || rec.title,
+            `folder-name mismatch names episodes in the same season (${unexpected.map(u => u.season + 'x' + u.episode).join(', ') || 'unparsed'}); could be a mislabelled file, left for a human`);
           return false;
         }
         ids.forEach(id => mapped.add(id));
