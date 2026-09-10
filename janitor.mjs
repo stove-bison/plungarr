@@ -959,13 +959,23 @@ function lastSlot(cadence, now) {
   return d.getTime();
 }
 
-function chunkText(text, max) {
-  if (!max || text.length <= max) return [text];
+// UTF-8 size without Buffer, so the notifier works inside the test sandbox too.
+const utf8Bytes = s => { let n = 0; for (const ch of s) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; };
+
+// Split at line boundaries so no part exceeds `max` as measured by `size`
+// (characters by default, bytes for receivers with a byte limit).
+function chunkText(text, max, size = s => s.length) {
+  if (!max || size(text) <= max) return [text];
   const out = [];
   let cur = '';
   for (let line of text.split('\n')) {
-    while (line.length > max) { if (cur) { out.push(cur); cur = ''; } out.push(line.slice(0, max)); line = line.slice(max); }
-    if (cur && cur.length + 1 + line.length > max) { out.push(cur); cur = line; }
+    while (size(line) > max) {
+      if (cur) { out.push(cur); cur = ''; }
+      let n = Math.min(line.length, max);
+      while (n > 1 && size(line.slice(0, n)) > max) n = Math.ceil(n * 0.8);
+      out.push(line.slice(0, n)); line = line.slice(n);
+    }
+    if (cur && size(cur) + 1 + size(line) > max) { out.push(cur); cur = line; }
     else cur = cur ? cur + '\n' + line : line;
   }
   if (cur) out.push(cur);
@@ -980,8 +990,13 @@ function buildPayload(format, title, text, items, extra, token) {
       return { headers: json, bodies: chunkText(text, 2000).map(t => JSON.stringify({ content: t, ...extra })) };
     case 'slack':
       return { headers: json, bodies: [JSON.stringify({ text, ...extra })] };
-    case 'ntfy': // raw body to the topic URL; extra JSON becomes headers (Priority, Tags, ...)
-      return { headers: bearer({ 'Content-Type': 'text/plain; charset=utf-8', Title: title, ...extra }), bodies: [text] };
+    case 'ntfy': { // raw body to the topic URL; extra JSON becomes headers (Priority, Tags, ...)
+      // ntfy turns any message over 4096 bytes into an "attachment.txt", so
+      // long digests go out as numbered parts under that limit.
+      const bodies = chunkText(text, 4000, utf8Bytes);
+      const perBody = bodies.length > 1 ? bodies.map((_, i) => ({ Title: `${title} (${i + 1}/${bodies.length})` })) : [];
+      return { headers: bearer({ 'Content-Type': 'text/plain; charset=utf-8', Title: title, ...extra }), bodies, perBody };
+    }
     case 'gotify':
       return { headers: token ? { ...json, 'X-Gotify-Key': token } : json,
         bodies: [JSON.stringify({ title, message: text, priority: 5, ...extra })] };
@@ -998,9 +1013,9 @@ async function notifyPost(url, headers, body) {
 }
 
 async function notifySend(title, text, items) {
-  const { headers, bodies } = buildPayload(CONFIG.notify.format, title, text, items, CONFIG.notify.extra, CONFIG.notify.token);
+  const { headers, bodies, perBody = [] } = buildPayload(CONFIG.notify.format, title, text, items, CONFIG.notify.extra, CONFIG.notify.token);
   if (CONFIG.dryRun) { log('notify', 'NOTIFY-DIGEST (dry-run)', title, text.replace(/\s+/g, ' ').slice(0, 300)); return; }
-  for (const body of bodies) await notifyPost(CONFIG.notify.url, headers, body);
+  for (const [i, body] of bodies.entries()) await notifyPost(CONFIG.notify.url, { ...headers, ...(perBody[i] || {}) }, body);
 }
 
 const itemLine = ev => `- [${ev.app}] ${ev.action === 'NOTIFY' || ev.action === 'PROBLEM' || ev.action === 'CORRUPT-NOTIFY' ? '' : ev.action + ' '}${ev.title}${ev.detail ? ' — ' + ev.detail : ''}`;

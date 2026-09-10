@@ -641,6 +641,31 @@ test('N13: heartbeat sends a digest even when nothing else happened', async () =
   assert.ok(/alive/i.test(bodyOf(h.posts[0]).text));
 });
 
+test('N17: ntfy splits a digest over 4096 bytes at line boundaries and numbers the parts', () => {
+  const h = notifier();
+  const text = Array.from({ length: 60 }, (_, i) => `- [sonarr] IMPORTED Release.${i} \u2014 ` + 'x'.repeat(90)).join('\n');
+  const { headers, bodies, perBody } = h.buildPayload('ntfy', 'plungarr daily', text, [], {}, '');
+  assert.ok(bodies.length >= 2);
+  const bytes = s => [...s].reduce((n, ch) => n + (ch.codePointAt(0) < 0x80 ? 1 : ch.codePointAt(0) < 0x800 ? 2 : 3), 0);
+  for (const b of bodies) { assert.ok(bytes(b) <= 4096, 'part under the ntfy message limit'); assert.ok(b.startsWith('- ')); }
+  assert.equal(bodies.join('\n'), text);
+  assert.equal(headers.Title, 'plungarr daily');
+  assert.equal(perBody[0].Title, `plungarr daily (1/${bodies.length})`);
+  assert.equal(perBody[bodies.length - 1].Title, `plungarr daily (${bodies.length}/${bodies.length})`);
+});
+
+test('N18: a long ntfy digest goes out as several POSTs, each with its own part title', async () => {
+  const h = notifier({ NOTIFY_FORMAT: 'ntfy' }), st = state();
+  queued(h, Array.from({ length: 80 }, (_, i) => blocked(i + 1, ['Sample'], { title: `Some.Long.Release.Name.S01E${i}.1080p.WEB-DL.DDP5.1.H.264-GROUP` })));
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  await h.notifyFlush(st);
+  assert.ok(h.posts.length >= 2, 'more than one POST');
+  const titles = h.posts.map(p => p.headers.Title);
+  assert.equal(new Set(titles).size, titles.length, 'every part has a distinct title');
+  assert.match(titles[0], /\(1\/\d+\)$/);
+  for (const p of h.posts) assert.ok(p.body.length <= 4096);
+});
+
 test('N14: a repeating error line is sent once until the reminder window passes', async () => {
   const h = notifier({ NOTIFY_REMIND_DAYS: '1', NOTIFY_ATTENTION: 'none' }), st = state();
   for (let i = 0; i < 3; i++) h.log('state', 'STATE-ERROR', 'state save failed: EACCES', '');

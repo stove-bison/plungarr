@@ -72,7 +72,7 @@ container log. With it, plungarr POSTs digests to one receiver:
 |---|---|---|
 | `discord` | `{"content"}` | Webhook URL; long digests are split at 2000 characters |
 | `slack` | `{"text"}` | Incoming-webhook URL |
-| `ntfy` | raw text with a `Title` header | URL is the topic URL; `NOTIFY_TOKEN` becomes a Bearer header; `NOTIFY_EXTRA_JSON` fields become headers (`Priority`, `Tags`) |
+| `ntfy` | raw text with a `Title` header | URL is the topic URL; `NOTIFY_TOKEN` becomes a Bearer header; `NOTIFY_EXTRA_JSON` fields become headers (`Priority`, `Tags`); digests over 4000 bytes go out as numbered parts, since ntfy turns longer messages into an attachment |
 | `gotify` | `{"title","message","priority"}` | URL is `https://host/message`; `NOTIFY_TOKEN` is sent as `X-Gotify-Key` |
 | `apprise` | `{"title","body","type"}` | Apprise API notify URL with the key in the path; put stateless `urls` in `NOTIFY_EXTRA_JSON` |
 | `json` (default) | `{"source","title","text","items":[...]}` | For Home Assistant, n8n, or anything custom; `NOTIFY_TOKEN` becomes a Bearer header |

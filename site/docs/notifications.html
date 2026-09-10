@@ -33,7 +33,7 @@
 <tbody>
 <tr><td><code>discord</code></td><td>The channel's webhook URL</td><td><code>{"content"}</code>. Long digests are split at 2000 characters at line boundaries. Extra JSON can set <code>username</code>.</td></tr>
 <tr><td><code>slack</code></td><td>The incoming-webhook URL</td><td><code>{"text"}</code>.</td></tr>
-<tr><td><code>ntfy</code></td><td>The topic URL, e.g. <code>https://ntfy.sh/your-topic</code></td><td>Raw text with a <code>Title</code> header. Token becomes a Bearer header. Extra JSON fields become headers, e.g. <code>{"Priority":"4","Tags":"tv"}</code>.</td></tr>
+<tr><td><code>ntfy</code></td><td>The topic URL, e.g. <code>https://ntfy.sh/your-topic</code></td><td>Raw text with a <code>Title</code> header. Token becomes a Bearer header. Extra JSON fields become headers, e.g. <code>{"Priority":"4","Tags":"tv"}</code>. Digests over 4000 bytes are sent as numbered parts, because ntfy turns a longer message into an <code>attachment.txt</code>.</td></tr>
 <tr><td><code>gotify</code></td><td><code>https://host/message</code></td><td><code>{"title","message","priority"}</code>. Token is sent as <code>X-Gotify-Key</code>. Extra JSON can override <code>priority</code>.</td></tr>
 <tr><td><code>apprise</code></td><td>An Apprise API notify URL with the key in the path</td><td><code>{"title","body","type"}</code>. Token becomes a Bearer header. For the stateless endpoint put <code>urls</code> in extra JSON.</td></tr>
 <tr><td><code>json</code> (default)</td><td>Anything that accepts a POST</td><td><code>{"source":"plungarr","title","text","items":[…]}</code>. Token becomes a Bearer header. For Home Assistant, n8n, or your own script.</td></tr>

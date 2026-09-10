@@ -44,6 +44,10 @@
   are retried next cycle and never block queue processing. Dry run logs the
   digest text and never POSTs. A startup message validates the receiver.
 - Invalid notification settings stop startup naming the setting.
+- ntfy digests longer than 4000 bytes are split at line boundaries into
+  numbered parts ("plungarr daily (1/3)"). ntfy converts any message over
+  4096 bytes into an `attachment.txt`, which is what a busy first day
+  produced.
 
 # Orphaned downloads
 
