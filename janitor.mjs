@@ -226,6 +226,15 @@ const RX_FOLDER_MISMATCH = /unexpected considering the .+ folder name/i;
 const RX_ARCHIVE = /Found archive file, might need to be extracted/i;
 const RX_DANGEROUS = /Caution: Found (potentially dangerous|executable) file/i;
 const RX_SAMPLE = /^\s*Sample\s*$/i; // exact; "Unable to determine if file is a sample" stays ignorable
+// Sonarr's EpisodeTitleSpecification: the naming format uses the episode
+// title and it is still "TBA" or empty. Sonarr retries the import every
+// minute and stops requiring the title 48 hours after the episode aired, so
+// this clears itself (see titlePending()).
+const RX_TITLE_PENDING = /Episode (has a TBA title|does not have a title) and recently aired/i;
+const TITLE_WINDOW_MS = 48 * 3600_000;
+// Sonarr retries every minute, so an hour past its window means something
+// other than the title is holding the import.
+const TITLE_GRACE_MS = 3600_000;
 const ACTION_SETTING = {
   archive: 'ARCHIVE_ACTION', dangerous: 'DANGEROUS_FILE_ACTION',
   sample: 'SAMPLE_ACTION', not_upgrade: 'NOT_UPGRADE_ACTION',
@@ -310,6 +319,8 @@ function classify(rec) {
   if (msgs.some(m => RX_NOT_UPGRADE.test(m))) return 'not_upgrade';
   if (msgs.some(m => RX_SAMPLE.test(m))) return 'sample';
   if (msgs.some(m => RX_FOLDER_MISMATCH.test(m))) return 'folder_mismatch';
+  if (msgs.some(m => RX_TITLE_PENDING.test(m)) &&
+      msgs.every(m => RX_TITLE_PENDING.test(m) || IGNORABLE.some(rx => rx.test(m)))) return 'title_pending';
   if (msgs.every(m => IGNORABLE.some(rx => rx.test(m)))) return 'verified_import';
   return 'unknown';
 }
@@ -360,6 +371,8 @@ async function verifiedImport(app, rec, group = [rec]) {
     if (rej.length) {
       if (rej.every(r => RX_NOT_UPGRADE.test(r))) { skipped.add('not_upgrade'); continue; }
       if (rej.every(r => RX_SAMPLE.test(r))) { skipped.add('sample'); continue; }
+      // Force-importing would name the file "TBA"; wait for the title instead.
+      if (rej.every(r => RX_TITLE_PENDING.test(r))) { skipped.add('title_pending'); continue; }
       if (rej.every(r => RX_FOLDER_MISMATCH.test(r))) {
         if (CONFIG.actions.folder_mismatch !== 'import') { skipped.add('folder_mismatch'); continue; }
         const ids = (c.episodes || []).map(e => e.id);
@@ -467,6 +480,41 @@ async function applyAction(app, st, gateKey, group, rec, action, cls) {
   log(app.name, dry + 'REMOVED (discarded, no replacement search)', rec.title, reason);
 }
 
+// An episode title Sonarr is still waiting for. Ask Sonarr once to refresh
+// the series metadata (the title may already be on TheTVDB), then stay quiet
+// until 48 hours after the latest grabbed episode aired, plus a grace hour.
+// An episode with no air date is reported: Sonarr waits on it with no limit.
+async function titlePending(app, st, gateKey, group, rec) {
+  st.titleRefresh = st.titleRefresh || {};
+  const ids = [...grabbedEpisodeIds(group)];
+  if (!ids.length) {
+    log(app.name, 'NOTIFY', rec.title, 'episode title not known yet and the grab names no episodes; left untouched');
+    return;
+  }
+  if (!st.titleRefresh[gateKey]) {
+    if (CONFIG.dryRun) log(app.name, 'DRY-RUN refresh', rec.title, `series ${rec.seriesId}`);
+    else {
+      await api(app, 'POST', '/command', { name: 'RefreshSeries', seriesId: rec.seriesId });
+      log(app.name, 'REFRESHED', rec.title, 'episode title not known yet; asked for a series metadata refresh');
+    }
+    st.titleRefresh[gateKey] = Date.now();
+    return;
+  }
+  const eps = await api(app, 'GET', '/episode?' + ids.map(id => 'episodeIds=' + id).join('&'));
+  if (!Array.isArray(eps) || eps.length !== ids.length) {
+    log(app.name, 'NOTIFY', rec.title, 'episode title not known yet and the grabbed episodes could not be looked up; left untouched');
+    return;
+  }
+  const untitled = e => !e.title || !e.title.trim() || e.title === 'TBA';
+  if (eps.some(e => untitled(e) && !Number.isFinite(Date.parse(e.airDateUtc)))) {
+    log(app.name, 'NOTIFY', rec.title, 'episode title is TBA and the episode has no air date, so Sonarr waits for a title with no time limit; left untouched');
+    return;
+  }
+  const aired = eps.map(e => Date.parse(e.airDateUtc)).filter(Number.isFinite);
+  if (aired.length && Date.now() < Math.max(...aired) + TITLE_WINDOW_MS + TITLE_GRACE_MS) return;
+  log(app.name, 'NOTIFY', rec.title, 'still blocked on a TBA episode title more than 48 hours after airing, when Sonarr stops requiring one; something else is holding it, left untouched');
+}
+
 // ---------- one cycle for one app ----------
 async function arrQueue(app) {
   const records = [], seen = new Set();
@@ -529,7 +577,9 @@ async function processApp(app, st) {
         if (result === false) continue;
         effective = result; // every remaining candidate was rejected for one policy reason
       }
-      if (effective === 'dead_empty' || effective === 'dead_bundle') {
+      if (effective === 'title_pending') {
+        await titlePending(app, st, gateKey, group, rec);
+      } else if (effective === 'dead_empty' || effective === 'dead_bundle') {
         await applyAction(app, st, gateKey, group, rec, 'replace', effective);
       } else if (effective in ACTION_SETTING) {
         await applyAction(app, st, gateKey, group, rec, CONFIG.actions[effective], effective);
@@ -544,7 +594,7 @@ async function processApp(app, st) {
   }
   // prune state entries for downloads no longer queued
   const pfx = app.name + ':';
-  for (const m of [st.firstSeen, st.actioned]) {
+  for (const m of [st.firstSeen, st.actioned, st.titleRefresh || {}]) {
     for (const k of Object.keys(m)) {
       if (!k.includes(':')) { delete m[k]; continue; } // legacy bare keys
       if (k.startsWith(pfx) && !byDownload.has(k.slice(pfx.length))) delete m[k];

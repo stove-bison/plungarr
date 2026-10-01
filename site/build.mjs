@@ -1,5 +1,6 @@
 // Generates site/docs/settings.html from templates/plungarr.xml and
-// .env.example, and copies icon.svg into site/. No dependencies. Run from
+// .env.example, site/docs/changelog.html from CHANGELOG.md, and copies
+// icon.svg into site/. No dependencies. Run from
 // anywhere: paths are resolved relative to this file.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -68,3 +69,25 @@ if (!tpl.includes('<!-- SETTINGS -->')) throw new Error('settings.template.html 
 fs.writeFileSync(path.join(root, 'site/docs/settings.html'), tpl.replace('<!-- SETTINGS -->', rows.join('\n')));
 fs.copyFileSync(path.join(root, 'icon.svg'), path.join(root, 'site/icon.svg'));
 console.log(`settings.html: ${groups.reduce((n, g) => n + g.vars.length, 0) + extra.length} settings in ${groups.length + (extra.length ? 1 : 0)} groups`);
+
+// ---- CHANGELOG.md -> docs/changelog.html (## dates, ### headings, - bullets, `code`) ----
+const inline = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+const log = [];
+let inList = false;
+const closeList = () => { if (inList) { log.push('</ul>'); inList = false; } };
+for (const raw of read('CHANGELOG.md').split(/\r?\n/)) {
+  const line = raw.trim();
+  let m;
+  if (!line) { closeList(); continue; }
+  if (line.startsWith('# ')) continue; // the page template has its own h1
+  if ((m = line.match(/^## (.+)$/))) { closeList(); log.push(`<h2 id="${esc(m[1].toLowerCase().replace(/[^a-z0-9-]+/g, '-'))}">${inline(m[1])}</h2>`); continue; }
+  if ((m = line.match(/^### (.+)$/))) { closeList(); log.push(`<h3>${inline(m[1])}</h3>`); continue; }
+  if ((m = line.match(/^- (.+)$/))) { if (!inList) { log.push('<ul>'); inList = true; } log.push(`<li>${inline(m[1])}</li>`); continue; }
+  closeList();
+  log.push(`<p${log.length ? '' : ' class="lead"'}>${inline(line)}</p>`);
+}
+closeList();
+const logTpl = read('site/docs/changelog.template.html');
+if (!logTpl.includes('<!-- CHANGELOG -->')) throw new Error('changelog.template.html lacks <!-- CHANGELOG --> marker');
+fs.writeFileSync(path.join(root, 'site/docs/changelog.html'), logTpl.replace('<!-- CHANGELOG -->', log.join('\n')));
+console.log(`changelog.html: ${log.filter(l => l.startsWith('<h2')).length} dated entries`);

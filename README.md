@@ -2,6 +2,8 @@
 
 Docs, install guide and settings reference: https://stove-bison.github.io/plungarr/
 
+What changed and when: [CHANGELOG.md](CHANGELOG.md), also at https://stove-bison.github.io/plungarr/docs/changelog.html
+
 Unclogs your Sonarr/Radarr download pipeline. plungarr watches the queues and
 your SABnzbd downloads, and automatically fixes the stuck states that
 otherwise sit there until a human notices: dead usenet posts downloading at
@@ -30,6 +32,7 @@ download only counts as an orphan when no configured instance owns it.
 | Sonarr: **file name disagrees with the folder name** ("Episode 7x20 was unexpected considering the ... folder name", usually a parser quirk like `1x8_720.mkv`) | `FOLDER_MISMATCH_ACTION`, default **import**: use Sonarr's own file-to-episode mapping, only when it covers exactly the episodes that were grabbed and the unexpected episodes point at another season or run away into more than five (a parser quirk). A few extra episodes in the same season looks like a real mislabel and is reported. Also takes `replace`, `discard`, `notify`. |
 | Single-episode file that would replace a library file **spanning more episodes** | Treated as not an upgrade: `NOT_UPGRADE_ACTION` |
 | Completed or failed download **no configured arr grabbed** (series or movie deleted mid-download, NZB added by hand) | `ORPHAN_ACTION`, default **delete**: remove from the queue and the download client, no blocklist, no search. `notify` only reports it. Never fires while another configured instance owns the download. |
+| Sonarr: episode **title still "TBA"** ("Episode has a TBA title and recently aired"), which Sonarr holds for up to 48 hours after airing | Left for Sonarr, which imports it once the title arrives. plungarr asks Sonarr for one metadata refresh of the series (`REFRESHED`) and reports the download only if it is still blocked an hour after the 48 hours, or if the episode has no air date. Never force-imported, because the file would be named "TBA". |
 | Anything it doesn't recognize | `NOTIFY` log line, left untouched. Never guess. |
 
 The `*_ACTION` settings take one of these values (`FOLDER_MISMATCH_ACTION` adds

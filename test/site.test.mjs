@@ -27,6 +27,17 @@ test('site: settings page documents every template variable and every .env.examp
   for (const key of new Set([...targets, ...envKeys])) assert.ok(page.includes(`<code>${key}</code>`), `${key} missing from settings.html`);
 });
 
+test('site: changelog page carries every dated entry in CHANGELOG.md, newest first', () => {
+  execFileSync(process.execPath, [path.join(site, 'build.mjs')], { stdio: 'pipe' });
+  const dates = [...fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').matchAll(/^## (\d{4}-\d{2}-\d{2})$/gm)].map(m => m[1]);
+  assert.ok(dates.length >= 5, 'expected the backfilled history');
+  assert.deepEqual(dates, [...dates].sort().reverse(), 'entries are newest first');
+  const page = fs.readFileSync(path.join(site, 'docs', 'changelog.html'), 'utf8');
+  for (const d of dates) assert.ok(page.includes(`<h2 id="${d}">`), `${d} missing from changelog.html`);
+  assert.ok(!page.includes('<!-- CHANGELOG -->'), 'marker replaced');
+  assert.ok(!page.includes('`'), 'every code span rendered');
+});
+
 test('site: every internal link and asset resolves', () => {
   const files = htmlFiles(site);
   assert.ok(files.length >= 6, 'expected at least six pages');

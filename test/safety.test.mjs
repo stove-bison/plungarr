@@ -972,6 +972,107 @@ test('E2: the same rejection on an import candidate routes through NOT_UPGRADE_A
   assert.ok(h.logs.some(l => l.includes('NOTIFY') && l.includes('NOT_UPGRADE_ACTION')));
 });
 
+// ---------- episode title not known yet (Sonarr's EpisodeTitleSpecification) ----------
+const TBA = 'Episode has a TBA title and recently aired';
+const NO_TITLE = 'Episode does not have a title and recently aired';
+const HOUR = 3600_000;
+const episodes = (h, eps) => {
+  const fallback = h.fixture.api;
+  h.fixture.api = async (app, method, url, body) => {
+    if (!url.startsWith('/episode?')) return fallback(app, method, url, body);
+    h.calls.push({ app: app.name, method, url, body });
+    const ids = new URLSearchParams(url.split('?')[1]).getAll('episodeIds');
+    return eps.filter(e => ids.includes(String(e.id)));
+  };
+};
+const episode = (h, hoursAgo, extra = {}) => ({ id: 41, seriesId: 1, tvdbId: 900, episodeFileId: 0, seasonNumber: 4,
+  episodeNumber: 19, title: 'TBA', airDate: '', airDateUtc: new Date(h.now() - hoursAgo * HOUR).toISOString(),
+  hasFile: false, monitored: true, ...extra });
+const refreshes = h => h.calls.filter(c => c.url === '/command' && c.body?.name === 'RefreshSeries');
+const notifies = h => h.logs.filter(l => l.includes('| NOTIFY |'));
+
+test('T1: a recently aired episode with a TBA or missing title waits quietly and gets one metadata refresh', async () => {
+  for (const message of [TBA, NO_TITLE]) {
+    const h = harness(), st = state();
+    queued(h, [pending(1, [message])]); episodes(h, [episode(h, 2)]);
+    await h.processApp(sonarr, st);
+    assert.equal(refreshes(h).length, 0, 'waits out the age gate first');
+    for (let i = 0; i < 4; i++) { h.advance(6); await h.processApp(sonarr, st); }
+    assert.equal(JSON.stringify(refreshes(h).map(c => c.body)), '[{"name":"RefreshSeries","seriesId":1}]');
+    assert.equal(deletes(h).length, 0);
+    assert.equal(h.calls.filter(c => c.body?.name === 'ManualImport').length, 0);
+    assert.deepEqual(notifies(h), []);
+  }
+});
+
+test('T2: a multi-file TBA block (importBlocked with the "one or more episodes" line) is recognised too', async () => {
+  const h = harness(), st = state();
+  queued(h, [blocked(1, ['One or more episodes expected in this release were not imported or missing from the release', TBA], { episodeId: 41 })]);
+  episodes(h, [episode(h, 2)]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(refreshes(h).length, 1);
+  assert.deepEqual(notifies(h), []);
+});
+
+test('T3: still blocked an hour past the 48-hour window after airing is reported', async () => {
+  const h = harness(), st = state();
+  queued(h, [pending(1, [TBA])]); episodes(h, [episode(h, 47)]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st); // 47h06m: refresh
+  h.advance(60); await h.processApp(sonarr, st); // 48h06m: Sonarr's window closed, still inside the grace hour
+  assert.deepEqual(notifies(h), []);
+  h.advance(60); await h.processApp(sonarr, st); // 49h06m
+  assert.equal(notifies(h).length, 1);
+  assert.match(notifies(h)[0], /TBA/);
+  assert.equal(deletes(h).length, 0);
+});
+
+test('T4: an episode with no air date is reported the cycle after the refresh, since Sonarr would wait forever', async () => {
+  const h = harness(), st = state();
+  queued(h, [pending(1, [TBA])]); episodes(h, [episode(h, 0, { airDateUtc: undefined })]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(refreshes(h).length, 1);
+  assert.deepEqual(notifies(h), [], 'the refresh gets a cycle to work');
+  h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(notifies(h).length, 1);
+  assert.match(notifies(h)[0], /no air date/);
+});
+
+test('T5: a TBA rejection on the import candidate of a matched-by-ID download waits instead of force-importing', async () => {
+  const h = harness(), st = state();
+  h.candidates = [{ path: '/x.mkv', series: { id: 1 }, episodes: [{ id: 41 }], rejections: [{ reason: TBA }] }];
+  queued(h, [blocked(1, ['matched to series by ID'], { episodeId: 41 })]); episodes(h, [episode(h, 2)]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.body?.name === 'ManualImport').length, 0);
+  assert.equal(refreshes(h).length, 1);
+  assert.deepEqual(notifies(h), []);
+});
+
+test('T6: dry run logs the intended refresh and sends nothing', async () => {
+  const h = harness({ DRY_RUN: 'true' }), st = state();
+  queued(h, [pending(1, [TBA])]); episodes(h, [episode(h, 2)]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(h.calls.filter(c => c.method !== 'GET').length, 0);
+  assert.ok(h.logs.some(l => l.includes('DRY-RUN') && l.includes('Release.1')));
+});
+
+test('T7: the refresh record is dropped once the download leaves the queue', async () => {
+  const h = harness(), st = state(), records = [pending(1, [TBA])];
+  queued(h, records); episodes(h, [episode(h, 2)]);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(refreshes(h).length, 1);
+  records.length = 0; h.advance(6); await h.processApp(sonarr, st);
+  assert.deepEqual(Object.keys(st.titleRefresh), []);
+});
+
+test('T8: a TBA block with no grabbed episode ids is reported rather than waited on forever', async () => {
+  const h = harness(), st = state();
+  queued(h, [pending(1, [TBA], { episodeId: undefined })]); episodes(h, []);
+  await h.processApp(sonarr, st); h.advance(6); await h.processApp(sonarr, st);
+  assert.equal(notifies(h).length, 1);
+  assert.doesNotMatch(notifies(h)[0], /unrecognized/, 'recognised as a title block, not a generic one');
+  assert.equal(deletes(h).length, 0);
+});
+
 // ---------- leftover download folders ----------
 // Fake download tree: tree[dir] = { name: { kind: 'dir'|'file'|'link', mtime, size, children } }.
 function downloads(h, dirs) {

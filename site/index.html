@@ -17,6 +17,7 @@
     <a href="docs/notifications.html">Notifications</a>
     <a href="docs/compare.html">Compare</a>
     <a href="docs/faq.html">FAQ</a>
+    <a href="docs/changelog.html">Changelog</a>
     <a href="https://github.com/stove-bison/plungarr">GitHub</a>
   </nav>
 </div></header>
@@ -53,6 +54,7 @@
 <tr><td>Sonarr: the episode number in the file name disagrees with the release folder name, usually a parser quirk like <code>1x8_720.mkv</code></td><td><code>FOLDER_MISMATCH_ACTION</code>, default <strong>import</strong>: uses Sonarr's own file-to-episode mapping, only when it covers exactly the episodes that were grabbed and the mismatch looks like a parser quirk (another season, or many episodes). A few same-season episodes looks like a real mislabel and is reported.</td></tr>
 <tr><td>Blocked on a technicality but nothing left to import: the folder is gone, or every file is already in the library</td><td>Gone: remove, blocklist, search for a replacement. Already in the library: <code>NOT_UPGRADE_ACTION</code></td></tr>
 <tr><td>Single-episode file that would replace a library file spanning more episodes</td><td>Treated as not an upgrade, so <code>NOT_UPGRADE_ACTION</code> applies</td></tr>
+<tr><td>Sonarr: the episode title is still “TBA”, so Sonarr holds the import for up to 48 hours after airing</td><td>Left for Sonarr, which imports it once the title arrives. plungarr asks Sonarr for one metadata refresh of the series and reports the download only if it is still blocked an hour after the 48 hours, or if the episode has no air date. Never force-imported, because the file would be named “TBA”.</td></tr>
 <tr><td>Completed or failed download that no configured arr grabbed: a series or movie deleted while it was downloading, or an NZB added by hand</td><td><code>ORPHAN_ACTION</code>, default <strong>delete</strong>: removed from the queue and the download client, no blocklist, no search. Never while another configured instance owns it.</td></tr>
 <tr><td>“No files found are eligible for import”, or a season pack that is one video file</td><td>Remove, blocklist, search for a replacement</td></tr>
 <tr><td>Dead usenet post at the head of the SABnzbd queue: under 5 MB of progress in 45 minutes, or most articles missing</td><td>Remove through the arr that grabbed it, blocklist, search again. One per cycle, so live downloads keep going.</td></tr>

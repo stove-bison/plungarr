@@ -16,7 +16,7 @@
   <License>MIT</License>
   <ExtraSearchTerms>sonarr radarr sabnzbd queue stuck import stalled janitor</ExtraSearchTerms>
   <Requires>Sonarr and/or Radarr reachable from this container with an API key. SABnzbd is optional.</Requires>
-  <Changes>Optional leftover-folder sweep for SABnzbd's completed directory (LEFTOVER_DIRS, notify or delete). Orphaned downloads (series or movie deleted mid-download, NZB added by hand) are removed via ORPHAN_ACTION. Sonarr folder-name mismatches caused by parser quirks are imported with Sonarr's own mapping via FOLDER_MISMATCH_ACTION; possible real mislabels are reported. Matched-by-ID downloads with nothing left to import are cleared. Configurable actions for archive, dangerous-file, sample and not-an-upgrade blocks. Optional webhook notifications with daily/weekly/monthly digests.</Changes>
+  <Changes>What changed and when: [changelog](https://stove-bison.github.io/plungarr/docs/changelog.html). Latest, 2026-10-01: Sonarr downloads waiting on a TBA episode title are left for Sonarr to import, with one metadata refresh, and reported only if still blocked 48 hours after airing.</Changes>
   <Date>2026-09-10</Date>
   <ExtraParams/>
   <PostArgs/>

@@ -8,6 +8,7 @@ on:
       - 'templates/**'
       - '.env.example'
       - 'icon.svg'
+      - 'CHANGELOG.md'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
